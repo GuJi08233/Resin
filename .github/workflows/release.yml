@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*' # Trigger on tags starting with v, e.g., v1.0.0, v1.0.0-rc.1
+  workflow_dispatch: # Allow re-running the release pipeline for an existing tag ref
 
 concurrency:
   group: release-${{ github.ref }}
