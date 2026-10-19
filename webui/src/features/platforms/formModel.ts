@@ -1,7 +1,12 @@
 import { z } from "zod";
-import { allocationPolicies, emptyAccountBehaviors, missActions } from "./constants";
+import { allocationPolicies, emptyAccountBehaviors, missActions, statusCodeActions } from "./constants";
 import { parseHeaderLines, parseLinesToList } from "./formParsers";
-import type { Platform, PlatformCreateInput, PlatformUpdateInput } from "./types";
+import type {
+  Platform,
+  PlatformCreateInput,
+  PlatformStatusCodeAction,
+  PlatformUpdateInput,
+} from "./types";
 
 const platformNameForbiddenChars = ".:|/\\@?#%~";
 const platformNameForbiddenSpacing = " \t\r\n";
@@ -17,6 +22,20 @@ function containsAny(source: string, chars: string): boolean {
 }
 
 export const platformNameRuleHint = "平台名不能包含 .:|/\\@?#%~、空格、Tab、换行、回车，也不能为保留字。";
+
+export type PlatformStatusCodeRuleForm = {
+  code_from: string;
+  code_to: string;
+  action: PlatformStatusCodeAction;
+  cooldown: string;
+};
+
+const statusCodeRuleFormSchema = z.object({
+  code_from: z.string(),
+  code_to: z.string(),
+  action: z.enum(statusCodeActions),
+  cooldown: z.string().optional(),
+});
 
 export const platformFormSchema = z.object({
   name: z.string().trim()
@@ -38,6 +57,7 @@ export const platformFormSchema = z.object({
   reverse_proxy_fixed_account_header: z.string().optional(),
   allocation_policy: z.enum(allocationPolicies),
   passive_circuit_breaker_disabled: z.boolean(),
+  status_code_rules: z.array(statusCodeRuleFormSchema),
 }).superRefine((value, ctx) => {
   if (
     value.reverse_proxy_empty_account_behavior === "FIXED_HEADER" &&
@@ -48,6 +68,58 @@ export const platformFormSchema = z.object({
       path: ["reverse_proxy_fixed_account_header"],
       message: "用于提取 Account 的 Headers 不能为空",
     });
+  }
+
+  const ranges: Array<{ from: number; to: number; index: number }> = [];
+  (value.status_code_rules ?? []).forEach((rule, index) => {
+    const from = Number(rule.code_from);
+    const to = Number(rule.code_to);
+    const fromValid = rule.code_from.trim() !== "" && Number.isInteger(from) && from >= 100 && from <= 599;
+    const toValid = rule.code_to.trim() !== "" && Number.isInteger(to) && to >= 100 && to <= 599;
+    if (!fromValid) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["status_code_rules", index, "code_from"],
+        message: "状态码必须是 100 到 599 之间的整数",
+      });
+    }
+    if (!toValid) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["status_code_rules", index, "code_to"],
+        message: "状态码必须是 100 到 599 之间的整数",
+      });
+    }
+    if (!fromValid || !toValid) {
+      return;
+    }
+    if (from > to) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["status_code_rules", index, "code_to"],
+        message: "起始状态码不能大于结束状态码",
+      });
+      return;
+    }
+    if (rule.action === "COOLDOWN" && !(rule.cooldown ?? "").trim()) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["status_code_rules", index, "cooldown"],
+        message: "冷却规则必须填写冷却时长",
+      });
+    }
+    ranges.push({ from, to, index });
+  });
+
+  ranges.sort((a, b) => a.from - b.from || a.to - b.to);
+  for (let i = 1; i < ranges.length; i += 1) {
+    if (ranges[i].from <= ranges[i - 1].to) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["status_code_rules", ranges[i].index, "code_from"],
+        message: "状态码区间不能重叠",
+      });
+    }
   }
 });
 
@@ -63,6 +135,7 @@ export const defaultPlatformFormValues: PlatformFormValues = {
   reverse_proxy_fixed_account_header: "Authorization",
   allocation_policy: "BALANCED",
   passive_circuit_breaker_disabled: false,
+  status_code_rules: [],
 };
 
 export function platformToFormValues(platform: Platform): PlatformFormValues {
@@ -79,6 +152,12 @@ export function platformToFormValues(platform: Platform): PlatformFormValues {
     reverse_proxy_fixed_account_header: platform.reverse_proxy_fixed_account_header,
     allocation_policy: platform.allocation_policy,
     passive_circuit_breaker_disabled: platform.passive_circuit_breaker_disabled,
+    status_code_rules: (platform.status_code_rules ?? []).map((rule) => ({
+      code_from: String(rule.code_from),
+      code_to: String(rule.code_to),
+      action: rule.action,
+      cooldown: rule.cooldown ?? "",
+    })),
   };
 }
 
@@ -92,6 +171,12 @@ function toPlatformPayloadBase(values: PlatformFormValues) {
     reverse_proxy_fixed_account_header: parseHeaderLines(values.reverse_proxy_fixed_account_header).join("\n"),
     allocation_policy: values.allocation_policy,
     passive_circuit_breaker_disabled: values.passive_circuit_breaker_disabled,
+    status_code_rules: (values.status_code_rules ?? []).map((rule) => ({
+      code_from: Number(rule.code_from),
+      code_to: Number(rule.code_to),
+      action: rule.action,
+      cooldown: rule.action === "COOLDOWN" ? (rule.cooldown ?? "").trim() : "",
+    })),
   };
 }
 

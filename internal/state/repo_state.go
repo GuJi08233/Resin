@@ -50,6 +50,31 @@ func decodeStringSliceJSON(raw string) ([]string, error) {
 	return out, nil
 }
 
+func encodePlatformStatusCodeRulesJSON(rules []model.PlatformStatusCodeRule) (string, error) {
+	if rules == nil {
+		rules = []model.PlatformStatusCodeRule{}
+	}
+	data, err := json.Marshal(rules)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func decodePlatformStatusCodeRulesJSON(raw string) ([]model.PlatformStatusCodeRule, error) {
+	if strings.TrimSpace(raw) == "" {
+		return []model.PlatformStatusCodeRule{}, nil
+	}
+	var out []model.PlatformStatusCodeRule
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil, err
+	}
+	if out == nil {
+		out = []model.PlatformStatusCodeRule{}
+	}
+	return out, nil
+}
+
 // --- system_config ---
 
 // GetSystemConfig loads the runtime config and version from state.db.
@@ -144,6 +169,15 @@ func (r *StateRepo) UpsertPlatform(p model.Platform) error {
 	if err != nil {
 		return fmt.Errorf("encode platform %s region_filters: %w", p.ID, err)
 	}
+	normalizedRules, err := platform.StatusCodeRulesFromModel(p.StatusCodeRules)
+	if err != nil {
+		return err
+	}
+	p.StatusCodeRules = platform.StatusCodeRulesToModel(normalizedRules)
+	statusCodeRulesJSON, err := encodePlatformStatusCodeRulesJSON(p.StatusCodeRules)
+	if err != nil {
+		return fmt.Errorf("encode platform %s status_code_rules: %w", p.ID, err)
+	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -152,8 +186,8 @@ func (r *StateRepo) UpsertPlatform(p model.Platform) error {
 		INSERT INTO platforms (id, name, sticky_ttl_ns, regex_filters_json, region_filters_json,
 		                       reverse_proxy_miss_action, reverse_proxy_empty_account_behavior,
 		                       reverse_proxy_fixed_account_header, allocation_policy,
-		                       passive_circuit_breaker_disabled, updated_at_ns)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                       passive_circuit_breaker_disabled, status_code_rules_json, updated_at_ns)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			name                     = excluded.name,
 			sticky_ttl_ns            = excluded.sticky_ttl_ns,
@@ -164,10 +198,11 @@ func (r *StateRepo) UpsertPlatform(p model.Platform) error {
 			reverse_proxy_fixed_account_header   = excluded.reverse_proxy_fixed_account_header,
 			allocation_policy        = excluded.allocation_policy,
 			passive_circuit_breaker_disabled = excluded.passive_circuit_breaker_disabled,
+			status_code_rules_json   = excluded.status_code_rules_json,
 			updated_at_ns            = excluded.updated_at_ns
 	`, p.ID, p.Name, p.StickyTTLNs, regexFiltersJSON, regionFiltersJSON,
 		p.ReverseProxyMissAction, p.ReverseProxyEmptyAccountBehavior, p.ReverseProxyFixedAccountHeader,
-		p.AllocationPolicy, p.PassiveCircuitBreakerDisabled, p.UpdatedAtNs)
+		p.AllocationPolicy, p.PassiveCircuitBreakerDisabled, statusCodeRulesJSON, p.UpdatedAtNs)
 	if err != nil {
 		if isSQLiteUniqueConstraint(err) {
 			return fmt.Errorf("%w: platform name already exists", ErrConflict)
@@ -189,12 +224,21 @@ func isSQLiteUniqueConstraint(err error) bool {
 	return false
 }
 
-// DeletePlatform removes a platform by ID.
+// DeletePlatform removes a platform by ID, including its runtime exclusions.
 func (r *StateRepo) DeletePlatform(id string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	result, err := r.db.Exec("DELETE FROM platforms WHERE id = ?", id)
+	tx, err := r.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("DELETE FROM platform_egress_exclusions WHERE platform_id = ?", id); err != nil {
+		return err
+	}
+	result, err := tx.Exec("DELETE FROM platforms WHERE id = ?", id)
 	if err != nil {
 		return err
 	}
@@ -202,7 +246,7 @@ func (r *StateRepo) DeletePlatform(id string) error {
 	if n == 0 {
 		return ErrNotFound
 	}
-	return nil
+	return tx.Commit()
 }
 
 // GetPlatformName returns platform name by ID without decoding filter columns.
@@ -223,15 +267,16 @@ func (r *StateRepo) GetPlatform(id string) (*model.Platform, error) {
 	row := r.db.QueryRow(`SELECT id, name, sticky_ttl_ns, regex_filters_json, region_filters_json,
 			reverse_proxy_miss_action, reverse_proxy_empty_account_behavior,
 			reverse_proxy_fixed_account_header, allocation_policy,
-			passive_circuit_breaker_disabled, updated_at_ns
+			passive_circuit_breaker_disabled, status_code_rules_json, updated_at_ns
 			FROM platforms WHERE id = ?`, id)
 
 	var p model.Platform
-	var regexFiltersJSON, regionFiltersJSON string
+	var regexFiltersJSON, regionFiltersJSON, statusCodeRulesJSON string
 	var passiveCircuitBreakerDisabled int
 	if err := row.Scan(&p.ID, &p.Name, &p.StickyTTLNs, &regexFiltersJSON,
 		&regionFiltersJSON, &p.ReverseProxyMissAction, &p.ReverseProxyEmptyAccountBehavior,
-		&p.ReverseProxyFixedAccountHeader, &p.AllocationPolicy, &passiveCircuitBreakerDisabled, &p.UpdatedAtNs); err != nil {
+		&p.ReverseProxyFixedAccountHeader, &p.AllocationPolicy, &passiveCircuitBreakerDisabled,
+		&statusCodeRulesJSON, &p.UpdatedAtNs); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, ErrNotFound
 		}
@@ -246,14 +291,19 @@ func (r *StateRepo) GetPlatform(id string) (*model.Platform, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decode platform %s region_filters_json: %w", p.ID, err)
 	}
+	statusCodeRules, err := decodePlatformStatusCodeRulesJSON(statusCodeRulesJSON)
+	if err != nil {
+		return nil, fmt.Errorf("decode platform %s status_code_rules_json: %w", p.ID, err)
+	}
 	p.RegexFilters = regexFilters
 	p.RegionFilters = regionFilters
+	p.StatusCodeRules = statusCodeRules
 	return &p, nil
 }
 
 // ListPlatforms returns all platforms.
 func (r *StateRepo) ListPlatforms() ([]model.Platform, error) {
-	rows, err := r.db.Query("SELECT id, name, sticky_ttl_ns, regex_filters_json, region_filters_json, reverse_proxy_miss_action, reverse_proxy_empty_account_behavior, reverse_proxy_fixed_account_header, allocation_policy, passive_circuit_breaker_disabled, updated_at_ns FROM platforms")
+	rows, err := r.db.Query("SELECT id, name, sticky_ttl_ns, regex_filters_json, region_filters_json, reverse_proxy_miss_action, reverse_proxy_empty_account_behavior, reverse_proxy_fixed_account_header, allocation_policy, passive_circuit_breaker_disabled, status_code_rules_json, updated_at_ns FROM platforms")
 	if err != nil {
 		return nil, err
 	}
@@ -262,11 +312,12 @@ func (r *StateRepo) ListPlatforms() ([]model.Platform, error) {
 	var result []model.Platform
 	for rows.Next() {
 		var p model.Platform
-		var regexFiltersJSON, regionFiltersJSON string
+		var regexFiltersJSON, regionFiltersJSON, statusCodeRulesJSON string
 		var passiveCircuitBreakerDisabled int
 		if err := rows.Scan(&p.ID, &p.Name, &p.StickyTTLNs, &regexFiltersJSON,
 			&regionFiltersJSON, &p.ReverseProxyMissAction, &p.ReverseProxyEmptyAccountBehavior,
-			&p.ReverseProxyFixedAccountHeader, &p.AllocationPolicy, &passiveCircuitBreakerDisabled, &p.UpdatedAtNs); err != nil {
+			&p.ReverseProxyFixedAccountHeader, &p.AllocationPolicy, &passiveCircuitBreakerDisabled,
+			&statusCodeRulesJSON, &p.UpdatedAtNs); err != nil {
 			return nil, err
 		}
 		p.PassiveCircuitBreakerDisabled = passiveCircuitBreakerDisabled != 0
@@ -278,11 +329,85 @@ func (r *StateRepo) ListPlatforms() ([]model.Platform, error) {
 		if err != nil {
 			return nil, fmt.Errorf("decode platform %s region_filters_json: %w", p.ID, err)
 		}
+		statusCodeRules, err := decodePlatformStatusCodeRulesJSON(statusCodeRulesJSON)
+		if err != nil {
+			return nil, fmt.Errorf("decode platform %s status_code_rules_json: %w", p.ID, err)
+		}
 		p.RegexFilters = regexFilters
 		p.RegionFilters = regionFilters
+		p.StatusCodeRules = statusCodeRules
 		result = append(result, p)
 	}
 	return result, rows.Err()
+}
+
+// --- platform egress exclusions ---
+
+// UpsertPlatformEgressExclusion inserts or replaces one platform exclusion.
+func (r *StateRepo) UpsertPlatformEgressExclusion(e model.PlatformEgressExclusion) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	_, err := r.db.Exec(`
+		INSERT INTO platform_egress_exclusions (
+			platform_id, egress_ip, action, status_code, node_hash, created_at_ns, expires_at_ns
+		) VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(platform_id, egress_ip) DO UPDATE SET
+			action        = excluded.action,
+			status_code   = excluded.status_code,
+			node_hash     = excluded.node_hash,
+			created_at_ns = excluded.created_at_ns,
+			expires_at_ns = excluded.expires_at_ns
+	`, e.PlatformID, e.EgressIP, e.Action, e.StatusCode, e.NodeHash, e.CreatedAtNs, e.ExpiresAtNs)
+	return err
+}
+
+// ListPlatformEgressExclusions returns all persisted exclusions.
+func (r *StateRepo) ListPlatformEgressExclusions() ([]model.PlatformEgressExclusion, error) {
+	rows, err := r.db.Query(`
+		SELECT platform_id, egress_ip, action, status_code, node_hash, created_at_ns, expires_at_ns
+		FROM platform_egress_exclusions
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []model.PlatformEgressExclusion
+	for rows.Next() {
+		var e model.PlatformEgressExclusion
+		if err := rows.Scan(&e.PlatformID, &e.EgressIP, &e.Action, &e.StatusCode,
+			&e.NodeHash, &e.CreatedAtNs, &e.ExpiresAtNs); err != nil {
+			return nil, err
+		}
+		result = append(result, e)
+	}
+	return result, rows.Err()
+}
+
+// DeletePlatformEgressExclusion removes one exclusion. Missing rows are not an error.
+func (r *StateRepo) DeletePlatformEgressExclusion(platformID, egressIP string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	_, err := r.db.Exec(
+		"DELETE FROM platform_egress_exclusions WHERE platform_id = ? AND egress_ip = ?",
+		platformID, egressIP,
+	)
+	return err
+}
+
+// DeleteExpiredPlatformEgressExclusions removes cooldowns whose expiry is at or
+// before nowNs.
+func (r *StateRepo) DeleteExpiredPlatformEgressExclusions(nowNs int64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	_, err := r.db.Exec(`
+		DELETE FROM platform_egress_exclusions
+		WHERE action = 'COOLDOWN' AND expires_at_ns > 0 AND expires_at_ns <= ?
+	`, nowNs)
+	return err
 }
 
 // --- subscriptions ---

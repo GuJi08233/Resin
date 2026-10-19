@@ -23,6 +23,10 @@ type PoolRangeFunc func(fn func(node.Hash, *node.NodeEntry) bool)
 // GetEntryFunc retrieves a node entry from the global pool by hash.
 type GetEntryFunc func(node.Hash) (*node.NodeEntry, bool)
 
+// NodeExcluder reports whether a node is temporarily excluded from this
+// platform by runtime state (for example an egress IP cooldown or blacklist).
+type NodeExcluder func(*node.NodeEntry) bool
+
 // Platform represents a routing platform with its filtered routable view.
 type Platform struct {
 	ID   string
@@ -40,6 +44,7 @@ type Platform struct {
 	ReverseProxyFixedAccountHeaders  []string
 	AllocationPolicy                 AllocationPolicy
 	PassiveCircuitBreakerDisabled    bool
+	StatusCodeRules                  []StatusCodeRule
 
 	// Routable view & its lock.
 	// viewMu serializes both FullRebuild and NotifyDirty.
@@ -77,12 +82,31 @@ func (p *Platform) FullRebuild(
 	subLookup node.SubLookupFunc,
 	geoLookup GeoLookupFunc,
 ) {
+	p.fullRebuild(poolRange, subLookup, geoLookup, nil)
+}
+
+// FullRebuildExcluding is FullRebuild with an optional runtime exclusion check.
+func (p *Platform) FullRebuildExcluding(
+	poolRange PoolRangeFunc,
+	subLookup node.SubLookupFunc,
+	geoLookup GeoLookupFunc,
+	excluder NodeExcluder,
+) {
+	p.fullRebuild(poolRange, subLookup, geoLookup, excluder)
+}
+
+func (p *Platform) fullRebuild(
+	poolRange PoolRangeFunc,
+	subLookup node.SubLookupFunc,
+	geoLookup GeoLookupFunc,
+	excluder NodeExcluder,
+) {
 	p.viewMu.Lock()
 	defer p.viewMu.Unlock()
 
 	p.view.Clear()
 	poolRange(func(h node.Hash, entry *node.NodeEntry) bool {
-		if p.evaluateNode(entry, subLookup, geoLookup) {
+		if p.evaluateNode(entry, subLookup, geoLookup, excluder) {
 			p.view.Add(h)
 		}
 		return true
@@ -97,6 +121,27 @@ func (p *Platform) NotifyDirty(
 	subLookup node.SubLookupFunc,
 	geoLookup GeoLookupFunc,
 ) {
+	p.notifyDirty(h, getEntry, subLookup, geoLookup, nil)
+}
+
+// NotifyDirtyExcluding is NotifyDirty with an optional runtime exclusion check.
+func (p *Platform) NotifyDirtyExcluding(
+	h node.Hash,
+	getEntry GetEntryFunc,
+	subLookup node.SubLookupFunc,
+	geoLookup GeoLookupFunc,
+	excluder NodeExcluder,
+) {
+	p.notifyDirty(h, getEntry, subLookup, geoLookup, excluder)
+}
+
+func (p *Platform) notifyDirty(
+	h node.Hash,
+	getEntry GetEntryFunc,
+	subLookup node.SubLookupFunc,
+	geoLookup GeoLookupFunc,
+	excluder NodeExcluder,
+) {
 	p.viewMu.Lock()
 	defer p.viewMu.Unlock()
 
@@ -107,7 +152,7 @@ func (p *Platform) NotifyDirty(
 		return
 	}
 
-	if p.evaluateNode(entry, subLookup, geoLookup) {
+	if p.evaluateNode(entry, subLookup, geoLookup, excluder) {
 		p.view.Add(h)
 	} else {
 		p.view.Remove(h)
@@ -119,6 +164,7 @@ func (p *Platform) evaluateNode(
 	entry *node.NodeEntry,
 	subLookup node.SubLookupFunc,
 	geoLookup GeoLookupFunc,
+	excluder NodeExcluder,
 ) bool {
 	// 0. Disabled nodes are never routable.
 	if entry.IsDisabledBySubscriptions(subLookup) {
@@ -141,7 +187,12 @@ func (p *Platform) evaluateNode(
 		return false
 	}
 
-	// 4. Region filter (when configured).
+	// 4. Platform-scoped runtime exclusion (cooldown / blacklist by egress IP).
+	if excluder != nil && excluder(entry) {
+		return false
+	}
+
+	// 5. Region filter (when configured).
 	if len(p.RegionFilters) > 0 {
 		region := entry.GetRegion(geoLookup)
 		if !MatchRegionFilter(region, p.RegionFilters) {
@@ -149,7 +200,7 @@ func (p *Platform) evaluateNode(
 		}
 	}
 
-	// 5. Has at least one latency record.
+	// 6. Has at least one latency record.
 	if !entry.HasLatency() {
 		return false
 	}

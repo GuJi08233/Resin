@@ -1,6 +1,23 @@
 export type PlatformMissAction = "TREAT_AS_EMPTY" | "REJECT";
 export type PlatformEmptyAccountBehavior = "RANDOM" | "FIXED_HEADER" | "ACCOUNT_HEADER_RULE";
 export type PlatformAllocationPolicy = "BALANCED" | "PREFER_LOW_LATENCY" | "PREFER_IDLE_IP";
+export type PlatformStatusCodeAction = "COOLDOWN" | "BLACKLIST";
+
+export type PlatformStatusCodeRule = {
+  code_from: number;
+  code_to: number;
+  action: PlatformStatusCodeAction;
+  cooldown?: string;
+};
+
+export type PlatformExclusion = {
+  egress_ip: string;
+  action: PlatformStatusCodeAction;
+  status_code: number;
+  node_hash: string;
+  created_at: string;
+  expires_at: string | null;
+};
 
 export type Platform = {
   id: string;
@@ -14,6 +31,7 @@ export type Platform = {
   reverse_proxy_fixed_account_header: string;
   allocation_policy: PlatformAllocationPolicy;
   passive_circuit_breaker_disabled: boolean;
+  status_code_rules: PlatformStatusCodeRule[];
   updated_at: string;
 };
 
@@ -34,6 +52,7 @@ export type PlatformCreateInput = {
   reverse_proxy_fixed_account_header?: string;
   allocation_policy?: PlatformAllocationPolicy;
   passive_circuit_breaker_disabled?: boolean;
+  status_code_rules?: PlatformStatusCodeRule[];
 };
 
 export type PlatformUpdateInput = {
@@ -46,6 +65,7 @@ export type PlatformUpdateInput = {
   reverse_proxy_fixed_account_header?: string;
   allocation_policy?: PlatformAllocationPolicy;
   passive_circuit_breaker_disabled?: boolean;
+  status_code_rules?: PlatformStatusCodeRule[];
 };
 
 export type PlatformLease = {

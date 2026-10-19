@@ -15,7 +15,29 @@ type Platform struct {
 	ReverseProxyFixedAccountHeader   string `json:"reverse_proxy_fixed_account_header"`
 	AllocationPolicy                 string `json:"allocation_policy"`
 	PassiveCircuitBreakerDisabled    bool   `json:"passive_circuit_breaker_disabled"`
-	UpdatedAtNs                      int64  `json:"updated_at_ns"`
+	StatusCodeRules                  []PlatformStatusCodeRule `json:"status_code_rules"`
+	UpdatedAtNs                      int64                    `json:"updated_at_ns"`
+}
+
+// PlatformStatusCodeRule maps an inclusive HTTP status code range to a
+// platform-scoped egress IP action.
+type PlatformStatusCodeRule struct {
+	CodeFrom   int    `json:"code_from"`
+	CodeTo     int    `json:"code_to"`
+	Action     string `json:"action"`
+	CooldownNs int64  `json:"cooldown_ns,omitempty"`
+}
+
+// PlatformEgressExclusion is a persisted platform-scoped cooldown or
+// blacklist keyed by egress IP. ExpiresAtNs is 0 for permanent blacklists.
+type PlatformEgressExclusion struct {
+	PlatformID  string `json:"platform_id"`
+	EgressIP    string `json:"egress_ip"`
+	Action      string `json:"action"`
+	StatusCode  int    `json:"status_code"`
+	NodeHash    string `json:"node_hash"`
+	CreatedAtNs int64  `json:"created_at_ns"`
+	ExpiresAtNs int64  `json:"expires_at_ns"`
 }
 
 // Subscription represents a node subscription source.

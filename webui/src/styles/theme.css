@@ -1818,6 +1818,51 @@ a {
   margin-top: 2px;
 }
 
+.status-code-rules {
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(37, 72, 120, 0.14);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.status-code-rule-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.status-code-rule-row {
+  display: grid;
+  grid-template-columns: minmax(80px, 110px) 16px minmax(80px, 110px) minmax(110px, 140px) minmax(120px, 160px) 36px;
+  gap: 8px;
+  align-items: center;
+}
+
+.status-code-rule-sep {
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.status-code-rule-error {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+@media (max-width: 1120px) {
+  .status-code-rule-row {
+    grid-template-columns: 1fr 16px 1fr;
+  }
+
+  .status-code-rule-row > select {
+    grid-column: 1 / 3;
+  }
+
+  .status-code-rule-row > .btn {
+    grid-column: 3;
+  }
+}
+
 .geoip-status-grid {
   margin-top: 12px;
   display: grid;

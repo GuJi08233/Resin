@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"net/netip"
 	"time"
 
 	"github.com/Resinat/Resin/internal/node"
@@ -18,6 +19,13 @@ type passiveHealthRecorder interface {
 	RecordPassiveResult(platformID string, hash node.Hash, success bool)
 }
 
+// upstreamStatusRecorder receives upstream HTTP status codes for
+// platform-scoped cooldown/blacklist rules. It must not affect global health.
+type upstreamStatusRecorder interface {
+	HasUpstreamStatusRules(platformID string) bool
+	RecordUpstreamStatus(platformID string, hash node.Hash, egressIP netip.Addr, statusCode int)
+}
+
 func recordPassiveResultAsync(health HealthRecorder, route routing.RouteResult, success bool) {
 	if health == nil {
 		return
@@ -27,4 +35,15 @@ func recordPassiveResultAsync(health HealthRecorder, route routing.RouteResult, 
 		return
 	}
 	go health.RecordResult(route.NodeHash, success)
+}
+
+func recordUpstreamStatusAsync(health HealthRecorder, route routing.RouteResult, statusCode int) {
+	if health == nil || route.PlatformID == "" || !route.EgressIP.IsValid() {
+		return
+	}
+	recorder, ok := health.(upstreamStatusRecorder)
+	if !ok || !recorder.HasUpstreamStatusRules(route.PlatformID) {
+		return
+	}
+	go recorder.RecordUpstreamStatus(route.PlatformID, route.NodeHash, route.EgressIP, statusCode)
 }

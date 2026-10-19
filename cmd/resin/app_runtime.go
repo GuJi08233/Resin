@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -20,11 +21,13 @@ import (
 	"github.com/Resinat/Resin/internal/metrics"
 	"github.com/Resinat/Resin/internal/netutil"
 	"github.com/Resinat/Resin/internal/node"
+	"github.com/Resinat/Resin/internal/platform"
 	"github.com/Resinat/Resin/internal/proxy"
 	"github.com/Resinat/Resin/internal/requestlog"
 	"github.com/Resinat/Resin/internal/routing"
 	"github.com/Resinat/Resin/internal/service"
 	"github.com/Resinat/Resin/internal/state"
+	"github.com/Resinat/Resin/internal/topology"
 	"github.com/joho/godotenv"
 )
 
@@ -255,6 +258,12 @@ func (a *resinApp) bootstrapFromPersistence(engine *state.StateEngine) error {
 
 	// GeoIP moved to step 8 batch 1 (after lease restore, per DESIGN.md).
 
+	// Load platform-scoped status-code exclusions before the first rebuild so
+	// persisted cooldowns/blacklists apply immediately at startup.
+	if err := restorePlatformEgressExclusions(engine, a.topoRuntime.guard); err != nil {
+		return err
+	}
+
 	// Phase 8.1: Rebuild platform views BEFORE lease restore.
 	// DESIGN.md requires step 6 (rebuild) before step 7 (leases).
 	a.topoRuntime.pool.RebuildAllPlatforms()
@@ -355,6 +364,9 @@ func (a *resinApp) startBackgroundServices() {
 
 	a.topoRuntime.ephemeralCleaner.Start()
 	log.Println("Ephemeral cleaner started (batch 2)")
+
+	a.topoRuntime.guard.Start()
+	log.Println("Platform guard started (batch 2)")
 
 	// --- Step 8 Batch 3: Subscription scheduler (force full refresh on start) ---
 	a.topoRuntime.scheduler.Start()
@@ -471,6 +483,41 @@ func (a *resinApp) buildNetworkServers(engine *state.StateEngine) error {
 	return nil
 }
 
+func restorePlatformEgressExclusions(engine *state.StateEngine, guard *topology.PlatformGuard) error {
+	if engine == nil || guard == nil {
+		return nil
+	}
+	rows, err := engine.ListPlatformEgressExclusions()
+	if err != nil {
+		return fmt.Errorf("load platform egress exclusions: %w", err)
+	}
+	entries := make([]platform.Exclusion, 0, len(rows))
+	for _, row := range rows {
+		ip, err := netip.ParseAddr(row.EgressIP)
+		if err != nil || !ip.IsValid() {
+			continue
+		}
+		action := platform.StatusCodeAction(row.Action)
+		if !action.IsValid() {
+			continue
+		}
+		entry := platform.Exclusion{
+			PlatformID: row.PlatformID,
+			EgressIP:   ip,
+			Action:     action,
+			StatusCode: row.StatusCode,
+			NodeHash:   row.NodeHash,
+			CreatedAt:  time.Unix(0, row.CreatedAtNs),
+		}
+		if row.ExpiresAtNs > 0 {
+			entry.ExpiresAt = time.Unix(0, row.ExpiresAtNs)
+		}
+		entries = append(entries, entry)
+	}
+	guard.Load(entries)
+	return nil
+}
+
 func restorePersistedEndpoints(engine *state.StateEngine, endpointManager *endpointRuntimeManager) error {
 	customEndpoints, err := engine.ListEndpoints()
 	if err != nil {
@@ -563,6 +610,9 @@ func (a *resinApp) shutdown(ctx context.Context) {
 
 	a.topoRuntime.ephemeralCleaner.Stop()
 	log.Println("Ephemeral cleaner stopped")
+
+	a.topoRuntime.guard.Stop()
+	log.Println("Platform guard stopped")
 
 	a.topoRuntime.scheduler.Stop()
 	log.Println("Subscription scheduler stopped")

@@ -1026,6 +1026,121 @@ func TestAPIContract_PlatformPassiveCircuitBreaker(t *testing.T) {
 	assertErrorCode(t, rec, "INVALID_ARGUMENT")
 }
 
+func TestAPIContract_PlatformStatusCodeRules(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	rec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/platforms", map[string]any{
+		"name": "status-code-rules",
+		"status_code_rules": []map[string]any{
+			{"code_from": 429, "code_to": 429, "action": "COOLDOWN", "cooldown": "5m"},
+			{"code_from": 403, "code_to": 403, "action": "BLACKLIST"},
+		},
+	}, true)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create status: got %d, want %d, body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	body := decodeJSONMap(t, rec)
+	platformID, _ := body["id"].(string)
+	if platformID == "" {
+		t.Fatalf("create platform missing id: body=%s", rec.Body.String())
+	}
+	rules, ok := body["status_code_rules"].([]any)
+	if !ok || len(rules) != 2 {
+		t.Fatalf("create status_code_rules = %v, want 2 rules", body["status_code_rules"])
+	}
+	first, _ := rules[0].(map[string]any)
+	second, _ := rules[1].(map[string]any)
+	if first["action"] != "BLACKLIST" || first["code_from"] != float64(403) {
+		t.Fatalf("rules should be sorted and normalized: %+v", rules)
+	}
+	if second["cooldown"] != "5m0s" {
+		t.Fatalf("cooldown = %v, want 5m0s", second["cooldown"])
+	}
+
+	rec = doJSONRequest(t, srv, http.MethodPatch, "/api/v1/platforms/"+platformID, map[string]any{
+		"status_code_rules": []map[string]any{
+			{"code_from": 500, "code_to": 599, "action": "COOLDOWN", "cooldown": "30s"},
+		},
+	}, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body = decodeJSONMap(t, rec)
+	rules, _ = body["status_code_rules"].([]any)
+	if len(rules) != 1 {
+		t.Fatalf("patch status_code_rules = %v, want 1 rule", body["status_code_rules"])
+	}
+
+	rec = doJSONRequest(t, srv, http.MethodPatch, "/api/v1/platforms/"+platformID, map[string]any{
+		"status_code_rules": []map[string]any{
+			{"code_from": 400, "code_to": 499, "action": "COOLDOWN", "cooldown": "1m"},
+			{"code_from": 450, "code_to": 450, "action": "BLACKLIST"},
+		},
+	}, true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("overlapping patch status: got %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	assertErrorCode(t, rec, "INVALID_ARGUMENT")
+
+	rec = doJSONRequest(t, srv, http.MethodPatch, "/api/v1/platforms/"+platformID, map[string]any{
+		"status_code_rules": []map[string]any{
+			{"code_from": 403, "code_to": 403, "action": "BLACKLIST", "cooldown": "1m"},
+		},
+	}, true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("blacklist with cooldown status: got %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	assertErrorCode(t, rec, "INVALID_ARGUMENT")
+
+	rec = doJSONRequest(t, srv, http.MethodPatch, "/api/v1/platforms/"+platformID, map[string]any{
+		"status_code_rules": []map[string]any{
+			{"code_from": 403, "code_to": 403, "action": "BLACKLIST"},
+		},
+	}, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reset blacklist rule status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	guard := topology.NewPlatformGuard(cp.Pool)
+	cp.Pool.SetPlatformGuard(guard)
+	cp.Pool.RecordUpstreamStatus(platformID, node.Hash{1}, netip.MustParseAddr("203.0.113.80"), 403)
+
+	rec = doJSONRequest(t, srv, http.MethodGet, "/api/v1/platforms/"+platformID+"/exclusions", nil, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list exclusions status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body = decodeJSONMap(t, rec)
+	items, _ := body["items"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("exclusions = %v, want 1 item", body["items"])
+	}
+	item, _ := items[0].(map[string]any)
+	if item["egress_ip"] != "203.0.113.80" || item["action"] != "BLACKLIST" {
+		t.Fatalf("unexpected exclusion item: %+v", item)
+	}
+
+	rec = doJSONRequest(t, srv, http.MethodPost, "/api/v1/platforms/"+platformID+"/actions/unblock-egress-ip", map[string]any{
+		"egress_ip": "not-an-ip",
+	}, true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid unblock status: got %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	assertErrorCode(t, rec, "INVALID_ARGUMENT")
+
+	rec = doJSONRequest(t, srv, http.MethodPost, "/api/v1/platforms/"+platformID+"/actions/unblock-egress-ip", map[string]any{
+		"egress_ip": "203.0.113.80",
+	}, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unblock status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	rec = doJSONRequest(t, srv, http.MethodGet, "/api/v1/platforms/"+platformID+"/exclusions", nil, true)
+	body = decodeJSONMap(t, rec)
+	items, _ = body["items"].([]any)
+	if len(items) != 0 {
+		t.Fatalf("exclusions after unblock = %v, want empty", body["items"])
+	}
+}
+
 func TestAPIContract_SystemConfigPatchSemantics(t *testing.T) {
 	srv, _, runtimeCfg := newControlPlaneTestServer(t)
 

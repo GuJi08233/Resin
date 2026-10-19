@@ -2,6 +2,7 @@ import type {
   PlatformAllocationPolicy,
   PlatformEmptyAccountBehavior,
   PlatformMissAction,
+  PlatformStatusCodeAction,
 } from "./types";
 
 export const allocationPolicies: PlatformAllocationPolicy[] = [
@@ -33,4 +34,11 @@ export const emptyAccountBehaviorLabel: Record<PlatformEmptyAccountBehavior, str
   RANDOM: "随机路由",
   FIXED_HEADER: "提取指定请求头作为 Account",
   ACCOUNT_HEADER_RULE: "按照全局请求头规则提取 Account",
+};
+
+export const statusCodeActions: PlatformStatusCodeAction[] = ["COOLDOWN", "BLACKLIST"];
+
+export const statusCodeActionLabel: Record<PlatformStatusCodeAction, string> = {
+  COOLDOWN: "冷却",
+  BLACKLIST: "拉黑",
 };

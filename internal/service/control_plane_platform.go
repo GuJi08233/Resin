@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -21,18 +22,43 @@ import (
 
 // PlatformResponse is the API response model for a platform.
 type PlatformResponse struct {
-	ID                               string   `json:"id"`
-	Name                             string   `json:"name"`
-	StickyTTL                        string   `json:"sticky_ttl"`
-	RegexFilters                     []string `json:"regex_filters"`
-	RegionFilters                    []string `json:"region_filters"`
-	RoutableNodeCount                int      `json:"routable_node_count"`
-	ReverseProxyMissAction           string   `json:"reverse_proxy_miss_action"`
-	ReverseProxyEmptyAccountBehavior string   `json:"reverse_proxy_empty_account_behavior"`
-	ReverseProxyFixedAccountHeader   string   `json:"reverse_proxy_fixed_account_header"`
-	AllocationPolicy                 string   `json:"allocation_policy"`
-	PassiveCircuitBreakerDisabled    bool     `json:"passive_circuit_breaker_disabled"`
-	UpdatedAt                        string   `json:"updated_at"`
+	ID                               string                    `json:"id"`
+	Name                             string                    `json:"name"`
+	StickyTTL                        string                    `json:"sticky_ttl"`
+	RegexFilters                     []string                  `json:"regex_filters"`
+	RegionFilters                    []string                  `json:"region_filters"`
+	RoutableNodeCount                int                       `json:"routable_node_count"`
+	ReverseProxyMissAction           string                    `json:"reverse_proxy_miss_action"`
+	ReverseProxyEmptyAccountBehavior string                    `json:"reverse_proxy_empty_account_behavior"`
+	ReverseProxyFixedAccountHeader   string                    `json:"reverse_proxy_fixed_account_header"`
+	AllocationPolicy                 string                    `json:"allocation_policy"`
+	PassiveCircuitBreakerDisabled    bool                      `json:"passive_circuit_breaker_disabled"`
+	StatusCodeRules                  []StatusCodeRuleResponse  `json:"status_code_rules"`
+	UpdatedAt                        string                    `json:"updated_at"`
+}
+
+// StatusCodeRuleResponse is the API representation of one status code rule.
+type StatusCodeRuleResponse struct {
+	CodeFrom int    `json:"code_from"`
+	CodeTo   int    `json:"code_to"`
+	Action   string `json:"action"`
+	Cooldown string `json:"cooldown,omitempty"`
+}
+
+func statusCodeRulesToResponse(rules []model.PlatformStatusCodeRule) []StatusCodeRuleResponse {
+	result := make([]StatusCodeRuleResponse, 0, len(rules))
+	for _, rule := range rules {
+		item := StatusCodeRuleResponse{
+			CodeFrom: rule.CodeFrom,
+			CodeTo:   rule.CodeTo,
+			Action:   rule.Action,
+		}
+		if rule.CooldownNs > 0 {
+			item.Cooldown = time.Duration(rule.CooldownNs).String()
+		}
+		result = append(result, item)
+	}
+	return result
 }
 
 func platformToResponse(p model.Platform) PlatformResponse {
@@ -50,6 +76,7 @@ func platformToResponse(p model.Platform) PlatformResponse {
 		ReverseProxyFixedAccountHeader:   fixedHeader,
 		AllocationPolicy:                 p.AllocationPolicy,
 		PassiveCircuitBreakerDisabled:    p.PassiveCircuitBreakerDisabled,
+		StatusCodeRules:                  statusCodeRulesToResponse(p.StatusCodeRules),
 		UpdatedAt:                        time.Unix(0, p.UpdatedAtNs).UTC().Format(time.RFC3339Nano),
 	}
 }
@@ -76,6 +103,7 @@ type platformConfig struct {
 	ReverseProxyFixedAccountHeader   string
 	AllocationPolicy                 string
 	PassiveCircuitBreakerDisabled    bool
+	StatusCodeRules                  []platform.StatusCodeRule
 }
 
 func normalizePlatformMissAction(raw string) string {
@@ -107,10 +135,15 @@ func (s *ControlPlaneService) defaultPlatformConfig(name string) platformConfig 
 			s.EnvCfg.DefaultPlatformReverseProxyFixedAccountHeader,
 		),
 		AllocationPolicy: s.EnvCfg.DefaultPlatformAllocationPolicy,
+		StatusCodeRules:  []platform.StatusCodeRule{},
 	}
 }
 
-func platformConfigFromModel(mp model.Platform) platformConfig {
+func platformConfigFromModel(mp model.Platform) (platformConfig, error) {
+	rules, err := platform.StatusCodeRulesFromModel(mp.StatusCodeRules)
+	if err != nil {
+		return platformConfig{}, fmt.Errorf("status_code_rules: %w", err)
+	}
 	return platformConfig{
 		Name:                             mp.Name,
 		StickyTTLNs:                      mp.StickyTTLNs,
@@ -121,7 +154,8 @@ func platformConfigFromModel(mp model.Platform) platformConfig {
 		ReverseProxyFixedAccountHeader:   normalizeHeaderFieldName(mp.ReverseProxyFixedAccountHeader),
 		AllocationPolicy:                 mp.AllocationPolicy,
 		PassiveCircuitBreakerDisabled:    mp.PassiveCircuitBreakerDisabled,
-	}
+		StatusCodeRules:                  rules,
+	}, nil
 }
 
 func (cfg platformConfig) toModel(id string, updatedAtNs int64) model.Platform {
@@ -136,6 +170,7 @@ func (cfg platformConfig) toModel(id string, updatedAtNs int64) model.Platform {
 		ReverseProxyFixedAccountHeader:   cfg.ReverseProxyFixedAccountHeader,
 		AllocationPolicy:                 cfg.AllocationPolicy,
 		PassiveCircuitBreakerDisabled:    cfg.PassiveCircuitBreakerDisabled,
+		StatusCodeRules:                  platform.StatusCodeRulesToModel(cfg.StatusCodeRules),
 		UpdatedAtNs:                      updatedAtNs,
 	}
 }
@@ -145,7 +180,7 @@ func (cfg platformConfig) toRuntime(id string) (*platform.Platform, error) {
 	if err != nil {
 		return nil, err
 	}
-	return platform.NewConfiguredPlatform(
+	plat := platform.NewConfiguredPlatform(
 		id,
 		cfg.Name,
 		compiledRegexFilters,
@@ -156,7 +191,9 @@ func (cfg platformConfig) toRuntime(id string) (*platform.Platform, error) {
 		cfg.ReverseProxyFixedAccountHeader,
 		cfg.AllocationPolicy,
 		cfg.PassiveCircuitBreakerDisabled,
-	), nil
+	)
+	plat.StatusCodeRules = append([]platform.StatusCodeRule(nil), cfg.StatusCodeRules...)
+	return plat, nil
 }
 
 func validatePlatformMissAction(raw string) *ServiceError {
@@ -264,7 +301,45 @@ func validatePlatformConfig(cfg *platformConfig, validateRegionFilters bool) *Se
 	if err := validatePlatformEmptyAccountConfig(cfg); err != nil {
 		return err
 	}
+	normalizedRules, err := platform.NormalizeStatusCodeRules(cfg.StatusCodeRules)
+	if err != nil {
+		return invalidArg(err.Error())
+	}
+	cfg.StatusCodeRules = normalizedRules
 	return nil
+}
+
+// StatusCodeRuleRequest is the API input shape for one status code rule.
+type StatusCodeRuleRequest struct {
+	CodeFrom int    `json:"code_from"`
+	CodeTo   int    `json:"code_to"`
+	Action   string `json:"action"`
+	Cooldown string `json:"cooldown"`
+}
+
+func parseStatusCodeRuleRequests(reqs []StatusCodeRuleRequest) ([]platform.StatusCodeRule, *ServiceError) {
+	rules := make([]platform.StatusCodeRule, len(reqs))
+	for i, req := range reqs {
+		var cooldown time.Duration
+		if strings.TrimSpace(req.Cooldown) != "" {
+			d, err := time.ParseDuration(req.Cooldown)
+			if err != nil {
+				return nil, invalidArg(fmt.Sprintf("status_code_rules[%d].cooldown: %v", i, err))
+			}
+			cooldown = d
+		}
+		rules[i] = platform.StatusCodeRule{
+			CodeFrom: req.CodeFrom,
+			CodeTo:   req.CodeTo,
+			Action:   platform.StatusCodeAction(req.Action),
+			Cooldown: cooldown,
+		}
+	}
+	normalized, err := platform.NormalizeStatusCodeRules(rules)
+	if err != nil {
+		return nil, invalidArg(err.Error())
+	}
+	return normalized, nil
 }
 
 func (s *ControlPlaneService) compileAndUpsertPlatform(id string, cfg platformConfig) (model.Platform, *platform.Platform, *ServiceError) {
@@ -334,6 +409,7 @@ type CreatePlatformRequest struct {
 	ReverseProxyFixedAccountHeader   *string  `json:"reverse_proxy_fixed_account_header"`
 	AllocationPolicy                 *string  `json:"allocation_policy"`
 	PassiveCircuitBreakerDisabled    *bool    `json:"passive_circuit_breaker_disabled"`
+	StatusCodeRules                  []StatusCodeRuleRequest `json:"status_code_rules"`
 }
 
 // CreatePlatform creates a new platform.
@@ -391,6 +467,13 @@ func (s *ControlPlaneService) CreatePlatform(req CreatePlatformRequest) (*Platfo
 	if req.PassiveCircuitBreakerDisabled != nil {
 		cfg.PassiveCircuitBreakerDisabled = *req.PassiveCircuitBreakerDisabled
 	}
+	if req.StatusCodeRules != nil {
+		rules, svcErr := parseStatusCodeRuleRequests(req.StatusCodeRules)
+		if svcErr != nil {
+			return nil, svcErr
+		}
+		cfg.StatusCodeRules = rules
+	}
 	if err := validatePlatformConfig(&cfg, true); err != nil {
 		return nil, err
 	}
@@ -439,7 +522,10 @@ func (s *ControlPlaneService) UpdatePlatform(id string, patchJSON json.RawMessag
 		}
 	}
 
-	cfg := platformConfigFromModel(*current)
+	cfg, cfgErr := platformConfigFromModel(*current)
+	if cfgErr != nil {
+		return nil, internal("decode platform status_code_rules", cfgErr)
+	}
 
 	// Apply patch to current config.
 	if nameStr, ok, err := patch.optionalNonEmptyString("name"); err != nil {
@@ -508,6 +594,15 @@ func (s *ControlPlaneService) UpdatePlatform(id string, patchJSON json.RawMessag
 	} else if ok {
 		cfg.PassiveCircuitBreakerDisabled = disabled
 	}
+	if rulesReq, ok, err := patch.optionalStatusCodeRuleRequests("status_code_rules"); err != nil {
+		return nil, err
+	} else if ok {
+		rules, svcErr := parseStatusCodeRuleRequests(rulesReq)
+		if svcErr != nil {
+			return nil, svcErr
+		}
+		cfg.StatusCodeRules = rules
+	}
 	if err := validatePlatformConfig(&cfg, regionFiltersPatched); err != nil {
 		return nil, err
 	}
@@ -573,6 +668,60 @@ func (s *ControlPlaneService) RebuildPlatformView(id string) error {
 		return notFound("platform not found")
 	}
 	s.Pool.RebuildPlatform(plat)
+	return nil
+}
+
+// PlatformExclusionResponse describes one runtime cooldown or blacklist entry.
+type PlatformExclusionResponse struct {
+	EgressIP   string  `json:"egress_ip"`
+	Action     string  `json:"action"`
+	StatusCode int     `json:"status_code"`
+	NodeHash   string  `json:"node_hash"`
+	CreatedAt  string  `json:"created_at"`
+	ExpiresAt  *string `json:"expires_at"`
+}
+
+// ListPlatformExclusions returns a platform's active cooldowns and blacklists.
+func (s *ControlPlaneService) ListPlatformExclusions(id string) ([]PlatformExclusionResponse, error) {
+	if _, err := s.getPlatformModel(id); err != nil {
+		return nil, err
+	}
+	entries := s.Pool.ListPlatformExclusions(id)
+	result := make([]PlatformExclusionResponse, 0, len(entries))
+	for _, entry := range entries {
+		item := PlatformExclusionResponse{
+			EgressIP:   entry.EgressIP.String(),
+			Action:     string(entry.Action),
+			StatusCode: entry.StatusCode,
+			NodeHash:   entry.NodeHash,
+			CreatedAt:  entry.CreatedAt.UTC().Format(time.RFC3339Nano),
+		}
+		if !entry.ExpiresAt.IsZero() {
+			expiresAt := entry.ExpiresAt.UTC().Format(time.RFC3339Nano)
+			item.ExpiresAt = &expiresAt
+		}
+		result = append(result, item)
+	}
+	return result, nil
+}
+
+// UnblockPlatformEgress removes one runtime exclusion and its persisted row.
+func (s *ControlPlaneService) UnblockPlatformEgress(id, egressIP string) error {
+	ip, err := netip.ParseAddr(strings.TrimSpace(egressIP))
+	if err != nil {
+		return invalidArg("egress_ip: must be a valid IP address")
+	}
+	if _, err := s.getPlatformModel(id); err != nil {
+		return err
+	}
+	if err := s.Engine.DeletePlatformEgressExclusion(id, ip.String()); err != nil {
+		return internal("delete platform exclusion", err)
+	}
+	if _, ok := s.Pool.UnblockPlatformEgress(id, ip.String()); ok {
+		if plat, ok := s.Pool.GetPlatform(id); ok {
+			s.Pool.RebuildPlatform(plat)
+		}
+	}
 	return nil
 }
 

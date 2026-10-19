@@ -34,6 +34,7 @@ import (
 type topologyRuntime struct {
 	subManager       *topology.SubscriptionManager
 	pool             *topology.GlobalNodePool
+	guard            *topology.PlatformGuard
 	probeMgr         *probe.ProbeManager
 	scheduler        *topology.SubscriptionScheduler
 	ephemeralCleaner *topology.EphemeralCleaner
@@ -239,6 +240,29 @@ func newTopologyRuntime(
 	})
 	log.Println("Topology: GlobalNodePool initialized")
 
+	platformGuard := topology.NewPlatformGuard(pool)
+	platformGuard.SetPersisters(
+		func(e platform.Exclusion) error {
+			expiresAtNs := int64(0)
+			if !e.ExpiresAt.IsZero() {
+				expiresAtNs = e.ExpiresAt.UnixNano()
+			}
+			return engine.UpsertPlatformEgressExclusion(model.PlatformEgressExclusion{
+				PlatformID:  e.PlatformID,
+				EgressIP:    e.EgressIP.String(),
+				Action:      string(e.Action),
+				StatusCode:  e.StatusCode,
+				NodeHash:    e.NodeHash,
+				CreatedAtNs: e.CreatedAt.UnixNano(),
+				ExpiresAtNs: expiresAtNs,
+			})
+		},
+		func(platformID, egressIP string) error {
+			return engine.DeletePlatformEgressExclusion(platformID, egressIP)
+		},
+	)
+	pool.SetPlatformGuard(platformGuard)
+
 	singboxBuilder, err := outbound.NewSingboxBuilderWithConfig(outbound.SingboxBuilderConfig{
 		DNSUpstreams: envCfg.NodeDNSUpstreams,
 	})
@@ -326,6 +350,7 @@ func newTopologyRuntime(
 	return &topologyRuntime{
 		subManager:       subManager,
 		pool:             pool,
+		guard:            platformGuard,
 		probeMgr:         probeMgr,
 		scheduler:        scheduler,
 		ephemeralCleaner: ephemeralCleaner,

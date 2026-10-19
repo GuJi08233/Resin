@@ -360,6 +360,9 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ModifyResponse: func(resp *http.Response) error {
 			lifecycle.setHTTPStatus(resp.StatusCode)
 			lifecycle.addIngressBytes(headerWireLen(resp.Header))
+			if hasRoute {
+				recordUpstreamStatusAsync(p.health, route, resp.StatusCode)
+			}
 			if resp.StatusCode == http.StatusSwitchingProtocols {
 				// 101 upgrade responses require a writable backend body
 				// (io.ReadWriteCloser). Do not wrap resp.Body here; wrapping with a

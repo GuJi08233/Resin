@@ -198,6 +198,52 @@ func HandleRebuildPlatform(cp *service.ControlPlaneService) http.HandlerFunc {
 	}
 }
 
+// HandleListPlatformExclusions returns a handler for
+// GET /api/v1/platforms/{id}/exclusions.
+func HandleListPlatformExclusions(cp *service.ControlPlaneService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, ok := requireUUIDPathParam(w, r, "id", "platform_id")
+		if !ok {
+			return
+		}
+		items, err := cp.ListPlatformExclusions(id)
+		if err != nil {
+			writeServiceError(w, err)
+			return
+		}
+		WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+	}
+}
+
+type unblockEgressRequest struct {
+	EgressIP string `json:"egress_ip"`
+}
+
+// HandleUnblockPlatformEgress returns a handler for
+// POST /api/v1/platforms/{id}/actions/unblock-egress-ip.
+func HandleUnblockPlatformEgress(cp *service.ControlPlaneService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, ok := requireUUIDPathParam(w, r, "id", "platform_id")
+		if !ok {
+			return
+		}
+		var req unblockEgressRequest
+		if err := DecodeBody(r, &req); err != nil {
+			writeDecodeBodyError(w, err)
+			return
+		}
+		if strings.TrimSpace(req.EgressIP) == "" {
+			writeInvalidArgument(w, "egress_ip: is required")
+			return
+		}
+		if err := cp.UnblockPlatformEgress(id, req.EgressIP); err != nil {
+			writeServiceError(w, err)
+			return
+		}
+		WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	}
+}
+
 // HandlePreviewFilter returns a handler for POST /api/v1/platforms/preview-filter.
 func HandlePreviewFilter(cp *service.ControlPlaneService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

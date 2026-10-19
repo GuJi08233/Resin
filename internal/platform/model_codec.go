@@ -130,7 +130,12 @@ func BuildFromModel(mp model.Platform) (*Platform, error) {
 		)
 	}
 
-	return NewConfiguredPlatform(
+	statusCodeRules, err := StatusCodeRulesFromModel(mp.StatusCodeRules)
+	if err != nil {
+		return nil, fmt.Errorf("decode platform %s status_code_rules: %w", mp.ID, err)
+	}
+
+	plat := NewConfiguredPlatform(
 		mp.ID,
 		mp.Name,
 		regexFilters,
@@ -141,5 +146,7 @@ func BuildFromModel(mp model.Platform) (*Platform, error) {
 		fixedHeader,
 		mp.AllocationPolicy,
 		mp.PassiveCircuitBreakerDisabled,
-	), nil
+	)
+	plat.StatusCodeRules = statusCodeRules
+	return plat, nil
 }

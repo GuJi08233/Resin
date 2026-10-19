@@ -200,6 +200,71 @@ func TestPlatformRegexFilterRulesMigrationIsIrreversible(t *testing.T) {
 	}
 }
 
+func TestMigrateStateDB_UpgradesV9PlatformDataToStatusCodeSchema(t *testing.T) {
+	dir := t.TempDir()
+	db, err := OpenDB(dir + "/state.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// Simulate the real v9 schema right before this feature was added.
+	_, err = db.Exec(`
+		CREATE TABLE schema_migrations (version uint64 NOT NULL PRIMARY KEY, dirty bool NOT NULL);
+		INSERT INTO schema_migrations (version, dirty) VALUES (9, 0);
+		CREATE TABLE platforms (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL UNIQUE,
+			sticky_ttl_ns INTEGER NOT NULL,
+			regex_filters_json TEXT NOT NULL DEFAULT '[]',
+			region_filters_json TEXT NOT NULL DEFAULT '[]',
+			reverse_proxy_miss_action TEXT NOT NULL DEFAULT 'TREAT_AS_EMPTY',
+			reverse_proxy_empty_account_behavior TEXT NOT NULL DEFAULT 'RANDOM',
+			reverse_proxy_fixed_account_header TEXT NOT NULL DEFAULT '',
+			allocation_policy TEXT NOT NULL DEFAULT 'BALANCED',
+			passive_circuit_breaker_disabled INTEGER NOT NULL DEFAULT 0,
+			updated_at_ns INTEGER NOT NULL
+		);
+		INSERT INTO platforms (
+			id, name, sticky_ttl_ns, regex_filters_json, region_filters_json,
+			reverse_proxy_miss_action, reverse_proxy_empty_account_behavior,
+			reverse_proxy_fixed_account_header, allocation_policy,
+			passive_circuit_breaker_disabled, updated_at_ns
+		) VALUES (
+			'legacy-v9', 'LegacyV9', 1000, '["^Provider/.*"]', '[]',
+			'TREAT_AS_EMPTY', 'RANDOM', '', 'BALANCED', 0, 1
+		);
+	`)
+	if err != nil {
+		t.Fatalf("create v9 schema: %v", err)
+	}
+
+	if err := MigrateStateDB(db); err != nil {
+		t.Fatalf("MigrateStateDB: %v", err)
+	}
+
+	var version int
+	var dirty bool
+	if err := db.QueryRow("SELECT version, dirty FROM schema_migrations LIMIT 1").Scan(&version, &dirty); err != nil {
+		t.Fatalf("read schema_migrations: %v", err)
+	}
+	if dirty || version != stateLatestVersion {
+		t.Fatalf("schema_migrations = (version=%d, dirty=%v), want (version=%d, dirty=false)", version, dirty, stateLatestVersion)
+	}
+
+	var rulesJSON string
+	if err := db.QueryRow(`SELECT status_code_rules_json FROM platforms WHERE id = 'legacy-v9'`).Scan(&rulesJSON); err != nil {
+		t.Fatalf("read migrated status_code_rules_json: %v", err)
+	}
+	if rulesJSON != "[]" {
+		t.Fatalf("existing platform status_code_rules_json = %q, want []", rulesJSON)
+	}
+
+	if ok, err := hasTable(db, "platform_egress_exclusions"); err != nil || !ok {
+		t.Fatalf("expected platform_egress_exclusions table, ok=%v err=%v", ok, err)
+	}
+}
+
 func TestMigrateStateDB_LegacyBaselineAdvancesToLatest(t *testing.T) {
 	dir := t.TempDir()
 	db, err := OpenDB(dir + "/state.db")
@@ -247,6 +312,12 @@ func TestMigrateStateDB_LegacyBaselineAdvancesToLatest(t *testing.T) {
 	}
 	if ok, err := hasTableColumn(db, "platforms", "passive_circuit_breaker_disabled"); err != nil || !ok {
 		t.Fatalf("expected migrated column platforms.passive_circuit_breaker_disabled, ok=%v err=%v", ok, err)
+	}
+	if ok, err := hasTableColumn(db, "platforms", "status_code_rules_json"); err != nil || !ok {
+		t.Fatalf("expected migrated column platforms.status_code_rules_json, ok=%v err=%v", ok, err)
+	}
+	if ok, err := hasTable(db, "platform_egress_exclusions"); err != nil || !ok {
+		t.Fatalf("expected migrated table platform_egress_exclusions, ok=%v err=%v", ok, err)
 	}
 }
 

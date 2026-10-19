@@ -24,8 +24,10 @@ import {
   deletePlatform,
   deletePlatformLease,
   getPlatform,
+  listPlatformExclusions,
   listPlatformLeases,
   resetPlatform,
+  unblockPlatformEgress,
   updatePlatform,
 } from "./api";
 import {
@@ -35,6 +37,7 @@ import {
   emptyAccountBehaviors,
   missActionLabel,
   missActions,
+  statusCodeActionLabel,
 } from "./constants";
 import {
   defaultPlatformFormValues,
@@ -46,7 +49,8 @@ import {
 } from "./formModel";
 import { PlatformAccessPanel } from "./PlatformAccessPanel";
 import { PlatformMonitorPanel } from "./PlatformMonitorPanel";
-import type { PlatformLease } from "./types";
+import { StatusCodeRuleEditor } from "./StatusCodeRuleEditor";
+import type { PlatformExclusion, PlatformLease } from "./types";
 
 type PlatformDetailTab = "monitor" | "access" | "config" | "ops";
 
@@ -116,11 +120,23 @@ export function PlatformDetailPage() {
     total: 0,
     limit: leasePageSize,
     offset: leasePage * leasePageSize,
-  };
-  const leases = leasesPage.items;
+  };  const leases = leasesPage.items;
   const isLeasePageTransitioning = leaseQuery.isFetching && leaseQuery.isPlaceholderData;
   const visibleLeases = isLeasePageTransitioning ? [] : leases;
   const leaseTotalPages = Math.max(1, Math.ceil(leasesPage.total / leasePageSize));
+
+  const exclusionsQuery = useQuery({
+    queryKey: ["platform-exclusions", platform?.id],
+    queryFn: () => {
+      if (!platform) {
+        throw new Error("平台不存在或已被删除");
+      }
+      return listPlatformExclusions(platform.id);
+    },
+    enabled: Boolean(platform?.id) && activeTab === "ops",
+    refetchInterval: 30_000,
+  });
+  const exclusions = exclusionsQuery.data ?? [];
 
   const editForm = useForm<PlatformFormValues>({
     resolver: zodResolver(platformFormSchema),
@@ -257,6 +273,30 @@ export function PlatformDetailPage() {
     },
   });
 
+  const unblockEgressMutation = useMutation({
+    mutationFn: async (egressIP: string) => {
+      if (!platform) {
+        throw new Error("平台不存在或已被删除");
+      }
+      await unblockPlatformEgress(platform.id, egressIP);
+      return egressIP;
+    },
+    onSuccess: async (egressIP) => {
+      if (platform) {
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: ["platform-exclusions", platform.id] }),
+          queryClient.invalidateQueries({ queryKey: ["platform", platform.id] }),
+          queryClient.invalidateQueries({ queryKey: ["platforms"] }),
+          queryClient.invalidateQueries({ queryKey: ["platform-monitor"] }),
+        ]);
+      }
+      showToast("success", t("出口 IP {{ip}} 已解除", { ip: egressIP }));
+    },
+    onError: (error) => {
+      showToast("error", formatApiErrorMessage(error, t));
+    },
+  });
+
   const deleteMutation = useMutation({
     mutationFn: async () => {
       if (!platform) {
@@ -310,6 +350,16 @@ export function PlatformDetailPage() {
       return;
     }
     await releaseLeaseMutation.mutateAsync(lease);
+  };
+
+  const handleUnblockEgress = async (entry: PlatformExclusion) => {
+    const confirmed = window.confirm(
+      t("确认解除出口 IP {{ip}} 的冷却/拉黑？", { ip: entry.egress_ip }),
+    );
+    if (!confirmed) {
+      return;
+    }
+    await unblockEgressMutation.mutateAsync(entry.egress_ip);
   };
 
   const changeLeasePageSize = (next: number) => {
@@ -380,9 +430,64 @@ export function PlatformDetailPage() {
     },
   ];
 
+  const exclusionColumns: ColumnDef<PlatformExclusion>[] = [
+    {
+      accessorKey: "egress_ip",
+      header: t("出口 IP"),
+      cell: ({ row }) => <span className="lease-account-cell">{row.original.egress_ip || "-"}</span>,
+    },
+    {
+      accessorKey: "action",
+      header: t("动作"),
+      cell: ({ row }) => (
+        <Badge variant={row.original.action === "BLACKLIST" ? "warning" : "success"}>
+          {t(statusCodeActionLabel[row.original.action])}
+        </Badge>
+      ),
+    },
+    {
+      accessorKey: "status_code",
+      header: t("触发状态码"),
+      cell: ({ row }) => (row.original.status_code > 0 ? row.original.status_code : "-"),
+    },
+    {
+      accessorKey: "created_at",
+      header: t("创建时间"),
+      cell: ({ row }) => formatDateTime(row.original.created_at),
+    },
+    {
+      accessorKey: "expires_at",
+      header: t("到期时间"),
+      cell: ({ row }) => (row.original.expires_at ? formatDateTime(row.original.expires_at) : t("永久")),
+    },
+    {
+      id: "actions",
+      header: t("操作"),
+      cell: ({ row }) => {
+        const entry = row.original;
+        const unblocking =
+          unblockEgressMutation.isPending && unblockEgressMutation.variables === entry.egress_ip;
+        return (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => void handleUnblockEgress(entry)}
+            disabled={unblocking}
+            title={t("解除")}
+            aria-label={t("解除出口 IP {{ip}}", { ip: entry.egress_ip })}
+            style={{ color: "var(--delete-btn-color, #c27070)" }}
+          >
+            <Trash2 size={14} />
+          </Button>
+        );
+      },
+    },
+  ];
+
   const stickyTTL = platform ? formatGoDuration(platform.sticky_ttl, t("默认")) : t("默认");
   const regionCount = platform?.region_filters.length ?? 0;
   const regexCount = platform?.regex_filters.length ?? 0;
+  const statusCodeRuleCount = platform?.status_code_rules.length ?? 0;
   const deleteDisabled = !platform || platform.id === ZERO_UUID || deleteMutation.isPending;
 
   return (
@@ -470,6 +575,10 @@ export function PlatformDetailPage() {
                 <span className="platform-fact">
                   <span>{t("请求失败熔断")}</span>
                   <strong>{platform.passive_circuit_breaker_disabled ? t("已关闭") : t("已开启")}</strong>
+                </span>
+                <span className="platform-fact">
+                  <span>{t("状态码规则")}</span>
+                  <strong>{statusCodeRuleCount}</strong>
                 </span>
               </div>
             </div>
@@ -667,6 +776,8 @@ export function PlatformDetailPage() {
                     </p>
                   </div>
 
+                  <StatusCodeRuleEditor form={editForm} idPrefix="detail-edit" />
+
                   <div className="platform-config-actions">
                     <Button type="submit" disabled={updateMutation.isPending}>
                       {updateMutation.isPending ? t("保存中...") : t("保存配置")}
@@ -720,6 +831,50 @@ export function PlatformDetailPage() {
                       </Button>
                     </div>
                   </div>
+                </section>
+
+                <section className="platform-lease-section">
+                  <div className="platform-drawer-section-head platform-lease-head">
+                    <div className="platform-lease-heading">
+                      <h4>{t("冷却与黑名单")}</h4>
+                      <p>{t("当前平台因状态码规则被排除的出口 IP。拉黑需要手动解除。")}</p>
+                    </div>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => void exclusionsQuery.refetch()}
+                      disabled={exclusionsQuery.isFetching}
+                    >
+                      <RefreshCw size={16} className={exclusionsQuery.isFetching ? "spin" : undefined} />
+                      {t("刷新")}
+                    </Button>
+                  </div>
+
+                  {exclusionsQuery.isLoading ? <p className="muted">{t("正在加载冷却与黑名单...")}</p> : null}
+
+                  {exclusionsQuery.isError ? (
+                    <div className="callout callout-error">
+                      <AlertTriangle size={14} />
+                      <span>{formatApiErrorMessage(exclusionsQuery.error, t)}</span>
+                    </div>
+                  ) : null}
+
+                  {!exclusionsQuery.isLoading && !exclusionsQuery.isError && !exclusions.length ? (
+                    <div className="empty-box">
+                      <Sparkles size={16} />
+                      <p>{t("当前平台暂无冷却或拉黑记录")}</p>
+                    </div>
+                  ) : null}
+
+                  {exclusions.length ? (
+                    <DataTable
+                      data={exclusions}
+                      columns={exclusionColumns}
+                      getRowId={(entry) => entry.egress_ip}
+                      className="data-table-leases"
+                      wrapClassName="platform-lease-table-wrap"
+                    />
+                  ) : null}
                 </section>
 
                 <section id={LEASE_MANAGEMENT_ANCHOR} className="platform-lease-section">

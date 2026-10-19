@@ -34,6 +34,7 @@ import {
   type PlatformFormValues,
 } from "./formModel";
 import type { Platform } from "./types";
+import { StatusCodeRuleEditor } from "./StatusCodeRuleEditor";
 
 const ZERO_UUID = "00000000-0000-0000-0000-000000000000";
 const EMPTY_PLATFORMS: Platform[] = [];
@@ -370,6 +371,8 @@ export function PlatformPage() {
                   {t("支持反选：以 ! 开头可排除地区（如 !hk）。可与正选混用，最终结果为“先正选再排除”。")}
                 </p>
               </div>
+
+              <StatusCodeRuleEditor form={createForm} idPrefix="create" />
 
               <div className="detail-actions">
                 <Button type="submit" disabled={createMutation.isPending}>

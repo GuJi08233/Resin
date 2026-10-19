@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Resinat/Resin/internal/netutil"
@@ -50,6 +51,9 @@ type GlobalNodePool struct {
 	maxConsecutiveFailures func() int
 	latencyDecayWindow     func() time.Duration
 	latencyAuthorities     func() []string
+
+	// Platform-scoped status-code exclusions (optional).
+	guard atomic.Pointer[PlatformGuard]
 }
 
 // PoolConfig configures the GlobalNodePool.
@@ -201,6 +205,9 @@ func (p *GlobalNodePool) UnregisterPlatform(id string) {
 		return
 	}
 	delete(p.platformByID, id)
+	if guard := p.guard.Load(); guard != nil {
+		guard.ClearPlatform(id)
+	}
 	if plat.Name != "" {
 		// Only delete when name still points at this platform.
 		if current, ok := p.platformByName[plat.Name]; ok && current == plat {
@@ -414,6 +421,22 @@ func (p *GlobalNodePool) MakeHealthyAndEnabledEvaluator() func(entry *node.NodeE
 	}
 }
 
+// SetPlatformGuard attaches the runtime status-code exclusion guard.
+// Must be called before background workers start.
+func (p *GlobalNodePool) SetPlatformGuard(g *PlatformGuard) {
+	p.guard.Store(g)
+}
+
+func (p *GlobalNodePool) platformExcluder(platformID string, now time.Time) platform.NodeExcluder {
+	guard := p.guard.Load()
+	if guard == nil || platformID == "" {
+		return nil
+	}
+	return func(entry *node.NodeEntry) bool {
+		return guard.Excluded(platformID, entry.GetEgressIP(), now)
+	}
+}
+
 // notifyAllPlatformsDirty tells every registered platform to re-evaluate a node.
 func (p *GlobalNodePool) notifyAllPlatformsDirty(hash node.Hash) {
 	platforms := p.platformSnapshot()
@@ -425,6 +448,7 @@ func (p *GlobalNodePool) notifyAllPlatformsDirty(hash node.Hash) {
 	getEntry := func(h node.Hash) (*node.NodeEntry, bool) {
 		return p.nodes.Load(h)
 	}
+	now := time.Now()
 
 	workers := runtime.GOMAXPROCS(0)
 	if workers < 1 {
@@ -442,7 +466,7 @@ func (p *GlobalNodePool) notifyAllPlatformsDirty(hash node.Hash) {
 		go func(plat *platform.Platform) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			plat.NotifyDirty(hash, getEntry, subLookup, p.geoLookup)
+			plat.NotifyDirtyExcluding(hash, getEntry, subLookup, p.geoLookup, p.platformExcluder(plat.ID, now))
 		}(plat)
 	}
 	wg.Wait()
@@ -470,13 +494,14 @@ func (p *GlobalNodePool) RebuildAllPlatforms() {
 
 	sem := make(chan struct{}, workers)
 	var wg sync.WaitGroup
+	now := time.Now()
 	for _, plat := range platforms {
 		sem <- struct{}{}
 		wg.Add(1)
 		go func(plat *platform.Platform) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			plat.FullRebuild(poolRange, subLookup, p.geoLookup)
+			plat.FullRebuildExcluding(poolRange, subLookup, p.geoLookup, p.platformExcluder(plat.ID, now))
 		}(plat)
 	}
 	wg.Wait()
@@ -488,7 +513,7 @@ func (p *GlobalNodePool) RebuildPlatform(plat *platform.Platform) {
 	poolRange := func(fn func(node.Hash, *node.NodeEntry) bool) {
 		p.nodes.Range(fn)
 	}
-	plat.FullRebuild(poolRange, subLookup, p.geoLookup)
+	plat.FullRebuildExcluding(poolRange, subLookup, p.geoLookup, p.platformExcluder(plat.ID, time.Now()))
 }
 
 // --- Health Management ---
@@ -566,6 +591,58 @@ func (p *GlobalNodePool) RecordPassiveResult(platformID string, hash node.Hash, 
 	if success || !p.passiveCircuitBreakerDisabled(platformID) {
 		p.RecordResult(hash, success)
 	}
+}
+
+// HasUpstreamStatusRules reports whether a platform has any status-code rules.
+// Used by the proxy layer to avoid dispatching work for rule-less platforms.
+func (p *GlobalNodePool) HasUpstreamStatusRules(platformID string) bool {
+	plat, ok := p.GetPlatform(platformID)
+	return ok && plat != nil && len(plat.StatusCodeRules) > 0
+}
+
+// RecordUpstreamStatus feeds an upstream HTTP response status code into the
+// platform-scoped exclusion rules. It never mutates global node health.
+func (p *GlobalNodePool) RecordUpstreamStatus(
+	platformID string,
+	hash node.Hash,
+	egressIP netip.Addr,
+	statusCode int,
+) {
+	if platformID == "" || !egressIP.IsValid() {
+		return
+	}
+	plat, ok := p.GetPlatform(platformID)
+	if !ok || plat == nil || len(plat.StatusCodeRules) == 0 {
+		return
+	}
+	rule, ok := platform.MatchStatusCodeRule(plat.StatusCodeRules, statusCode)
+	if !ok {
+		return
+	}
+	guard := p.guard.Load()
+	if guard == nil {
+		return
+	}
+	guard.RecordMatch(platformID, egressIP, rule, statusCode, hash.Hex())
+}
+
+// ListPlatformExclusions returns a platform's current cooldowns and blacklists.
+func (p *GlobalNodePool) ListPlatformExclusions(platformID string) []platform.Exclusion {
+	guard := p.guard.Load()
+	if guard == nil {
+		return []platform.Exclusion{}
+	}
+	return guard.List(platformID)
+}
+
+// UnblockPlatformEgress removes one exclusion from runtime state.
+// Persistence deletion is the caller's responsibility.
+func (p *GlobalNodePool) UnblockPlatformEgress(platformID, egressIP string) (platform.Exclusion, bool) {
+	guard := p.guard.Load()
+	if guard == nil {
+		return platform.Exclusion{}, false
+	}
+	return guard.Unblock(platformID, egressIP)
 }
 
 func (p *GlobalNodePool) passiveCircuitBreakerDisabled(platformID string) bool {

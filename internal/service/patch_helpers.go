@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -123,6 +124,24 @@ func (p mergePatch) optionalDurationString(field string) (time.Duration, bool, *
 		return 0, true, invalidArg(fmt.Sprintf("%s: %s", field, err.Error()))
 	}
 	return d, true, nil
+}
+
+func (p mergePatch) optionalStatusCodeRuleRequests(field string) ([]StatusCodeRuleRequest, bool, *ServiceError) {
+	raw, ok := p[field]
+	if !ok {
+		return nil, false, nil
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return nil, true, invalidArg(fmt.Sprintf("%s: invalid value", field))
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	var rules []StatusCodeRuleRequest
+	if err := dec.Decode(&rules); err != nil {
+		return nil, true, invalidArg(fmt.Sprintf("%s: %v", field, err))
+	}
+	return rules, true, nil
 }
 
 func parseHTTPAbsoluteURL(field, value string) (*url.URL, *ServiceError) {

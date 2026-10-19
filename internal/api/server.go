@@ -84,6 +84,8 @@ func NewServerWithAddress(
 		authed.Handle("DELETE /api/v1/platforms/{id}", HandleDeletePlatform(cp))
 		authed.Handle("POST /api/v1/platforms/{id}/actions/reset-to-default", HandleResetPlatform(cp))
 		authed.Handle("POST /api/v1/platforms/{id}/actions/rebuild-routable-view", HandleRebuildPlatform(cp))
+		authed.Handle("GET /api/v1/platforms/{id}/exclusions", HandleListPlatformExclusions(cp))
+		authed.Handle("POST /api/v1/platforms/{id}/actions/unblock-egress-ip", HandleUnblockPlatformEgress(cp))
 
 		// Endpoints.
 		authed.Handle("GET /api/v1/endpoints", HandleListEndpoints(cp))
