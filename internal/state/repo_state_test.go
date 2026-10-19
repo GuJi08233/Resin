@@ -187,6 +187,15 @@ func TestMigrateStateDB_ConvertsLegacyRegexFiltersToMustRules(t *testing.T) {
 	if len(got) != 0 {
 		t.Fatalf("migrated empty filters: got %v, want []", got)
 	}
+
+	// A real v1.2.0 database is at schema version 8. Verify the upgrade path
+	// reaches the v1.3.0 status-code schema as well.
+	if ok, err := hasTableColumn(db, "platforms", "status_code_rules_json"); err != nil || !ok {
+		t.Fatalf("expected migrated column platforms.status_code_rules_json, ok=%v err=%v", ok, err)
+	}
+	if ok, err := hasTable(db, "platform_egress_exclusions"); err != nil || !ok {
+		t.Fatalf("expected migrated table platform_egress_exclusions, ok=%v err=%v", ok, err)
+	}
 }
 
 func TestPlatformRegexFilterRulesMigrationIsIrreversible(t *testing.T) {
