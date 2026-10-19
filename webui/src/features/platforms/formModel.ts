@@ -72,10 +72,13 @@ export const platformFormSchema = z.object({
 
   const ranges: Array<{ from: number; to: number; index: number }> = [];
   (value.status_code_rules ?? []).forEach((rule, index) => {
-    const from = Number(rule.code_from);
-    const to = Number(rule.code_to);
-    const fromValid = rule.code_from.trim() !== "" && Number.isInteger(from) && from >= 100 && from <= 599;
-    const toValid = rule.code_to.trim() !== "" && Number.isInteger(to) && to >= 100 && to <= 599;
+    const fromText = rule.code_from.trim();
+    const toText = rule.code_to.trim();
+    const from = Number(fromText);
+    // An empty end code means "match this single status code".
+    const to = toText === "" ? from : Number(toText);
+    const fromValid = fromText !== "" && Number.isInteger(from) && from >= 100 && from <= 599;
+    const toValid = toText === "" || (Number.isInteger(to) && to >= 100 && to <= 599);
     if (!fromValid) {
       ctx.addIssue({
         code: "custom",
@@ -154,7 +157,8 @@ export function platformToFormValues(platform: Platform): PlatformFormValues {
     passive_circuit_breaker_disabled: platform.passive_circuit_breaker_disabled,
     status_code_rules: (platform.status_code_rules ?? []).map((rule) => ({
       code_from: String(rule.code_from),
-      code_to: String(rule.code_to),
+      // Render single-code rules as "429" rather than "429 ~ 429".
+      code_to: rule.code_to === rule.code_from ? "" : String(rule.code_to),
       action: rule.action,
       cooldown: rule.cooldown ?? "",
     })),
@@ -171,12 +175,16 @@ function toPlatformPayloadBase(values: PlatformFormValues) {
     reverse_proxy_fixed_account_header: parseHeaderLines(values.reverse_proxy_fixed_account_header).join("\n"),
     allocation_policy: values.allocation_policy,
     passive_circuit_breaker_disabled: values.passive_circuit_breaker_disabled,
-    status_code_rules: (values.status_code_rules ?? []).map((rule) => ({
-      code_from: Number(rule.code_from),
-      code_to: Number(rule.code_to),
-      action: rule.action,
-      cooldown: rule.action === "COOLDOWN" ? (rule.cooldown ?? "").trim() : "",
-    })),
+    status_code_rules: (values.status_code_rules ?? []).map((rule) => {
+      const codeFrom = Number(rule.code_from);
+      const codeToText = (rule.code_to ?? "").trim();
+      return {
+        code_from: codeFrom,
+        code_to: codeToText === "" ? codeFrom : Number(codeToText),
+        action: rule.action,
+        cooldown: rule.action === "COOLDOWN" ? (rule.cooldown ?? "").trim() : "",
+      };
+    }),
   };
 }
 

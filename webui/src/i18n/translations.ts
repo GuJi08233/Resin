@@ -779,6 +779,14 @@ Note: Once enabled, requests without authentication information are rejected ins
   "起始状态码不能大于结束状态码": "Start status code must not exceed end status code",
   "冷却规则必须填写冷却时长": "Cooldown rules require a cooldown duration",
   "状态码区间不能重叠": "Status code ranges must not overlap",
+  "状态码": "Status code",
+  "例如 429": "e.g. 429",
+  "结束状态码（可选）": "End status code (optional)",
+  "留空=单码": "Empty = single code",
+  "留空表示只匹配起始状态码；填写后按闭区间匹配。":
+    "Leave empty to match only the start status code; fill it to match an inclusive range.",
+  "支持单个状态码或区间：结束码留空表示只匹配起始码，填写后按闭区间匹配。":
+    "Supports a single status code or an inclusive range: leave the end code empty to match only the start code.",
 };
 
 export function translateDocumentTitle(locale: AppLocale): string {

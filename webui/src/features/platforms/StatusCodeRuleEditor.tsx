@@ -45,6 +45,9 @@ export function StatusCodeRuleEditor({ form, idPrefix }: StatusCodeRuleEditorPro
         <h4>{t("状态码冷却 / 拉黑")}</h4>
         <p>{t("当上游返回指定状态码时，仅对当前平台排除该出口 IP。冷却到期自动恢复，拉黑需手动解除。")}</p>
         <p className="muted" style={{ marginTop: 4, fontSize: 12 }}>
+          {t("支持单个状态码或区间：结束码留空表示只匹配起始码，填写后按闭区间匹配。")}
+        </p>
+        <p className="muted" style={{ marginTop: 4, fontSize: 12 }}>
           {t("仅 HTTP 正向代理和反向代理生效；CONNECT/SOCKS5 无法读取状态码。")}
         </p>
       </div>
@@ -57,8 +60,8 @@ export function StatusCodeRuleEditor({ form, idPrefix }: StatusCodeRuleEditorPro
             <div className="status-code-rule-row" key={field.id}>
               <Input
                 id={`${idPrefix}-status-code-from-${index}`}
-                aria-label={t("起始状态码")}
-                placeholder={t("起始码")}
+                aria-label={t("状态码")}
+                placeholder={t("例如 429")}
                 invalid={Boolean(rowErrorAt(index))}
                 {...form.register(`status_code_rules.${index}.code_from` as const)}
               />
@@ -67,8 +70,9 @@ export function StatusCodeRuleEditor({ form, idPrefix }: StatusCodeRuleEditorPro
               </span>
               <Input
                 id={`${idPrefix}-status-code-to-${index}`}
-                aria-label={t("结束状态码")}
-                placeholder={t("结束码")}
+                aria-label={t("结束状态码（可选）")}
+                placeholder={t("留空=单码")}
+                title={t("留空表示只匹配起始状态码；填写后按闭区间匹配。")}
                 invalid={Boolean(rowErrorAt(index))}
                 {...form.register(`status_code_rules.${index}.code_to` as const)}
               />
