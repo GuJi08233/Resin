@@ -37,7 +37,10 @@ func recordPassiveResultAsync(health HealthRecorder, route routing.RouteResult, 
 	go health.RecordResult(route.NodeHash, success)
 }
 
-func recordUpstreamStatusAsync(health HealthRecorder, route routing.RouteResult, statusCode int) {
+// Commit the in-memory exclusion before returning response headers to the
+// client, so an immediate retry cannot race status-code feedback. Persistence
+// and view rebuilds remain asynchronous in the recorder.
+func recordUpstreamStatus(health HealthRecorder, route routing.RouteResult, statusCode int) {
 	if health == nil || route.PlatformID == "" || !route.EgressIP.IsValid() {
 		return
 	}
@@ -45,5 +48,5 @@ func recordUpstreamStatusAsync(health HealthRecorder, route routing.RouteResult,
 	if !ok || !recorder.HasUpstreamStatusRules(route.PlatformID) {
 		return
 	}
-	go recorder.RecordUpstreamStatus(route.PlatformID, route.NodeHash, route.EgressIP, statusCode)
+	recorder.RecordUpstreamStatus(route.PlatformID, route.NodeHash, route.EgressIP, statusCode)
 }

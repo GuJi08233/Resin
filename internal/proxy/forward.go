@@ -288,7 +288,7 @@ func (p *ForwardProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	lifecycle.setHTTPStatus(resp.StatusCode)
 	lifecycle.setNetOK(true)
 	if hasRoute {
-		recordUpstreamStatusAsync(p.health, route, resp.StatusCode)
+		recordUpstreamStatus(p.health, route, resp.StatusCode)
 	}
 
 	// Copy end-to-end response headers and body.

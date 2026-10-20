@@ -626,6 +626,13 @@ func (p *GlobalNodePool) RecordUpstreamStatus(
 	guard.RecordMatch(platformID, egressIP, rule, statusCode, hash.Hex())
 }
 
+// IsPlatformEgressExcluded checks live exclusion state independently of the
+// asynchronously rebuilt platform view.
+func (p *GlobalNodePool) IsPlatformEgressExcluded(platformID string, ip netip.Addr) bool {
+	guard := p.guard.Load()
+	return guard != nil && guard.Excluded(platformID, ip, time.Now())
+}
+
 // ListPlatformExclusions returns a platform's current cooldowns and blacklists.
 func (p *GlobalNodePool) ListPlatformExclusions(platformID string) []platform.Exclusion {
 	guard := p.guard.Load()

@@ -52,6 +52,47 @@ func TestGuardStore_RepeatedCooldownDoesNotExtend(t *testing.T) {
 	}
 }
 
+func TestGuardStore_ExpiredCooldownCanMatchAgainWithoutSweep(t *testing.T) {
+	for _, action := range []StatusCodeAction{StatusCodeActionCooldown, StatusCodeActionBlacklist} {
+		t.Run(string(action), func(t *testing.T) {
+			store := NewGuardStore()
+			now := time.Now()
+			ip := netip.MustParseAddr("203.0.113.17")
+			cooldown := StatusCodeRule{
+				CodeFrom: 429, CodeTo: 429,
+				Action: StatusCodeActionCooldown, Cooldown: time.Minute,
+			}
+			first, _ := store.Apply("plat-1", ip, cooldown, 429, "node-a", now)
+			retriggeredAt := first.ExpiresAt
+			rule := StatusCodeRule{CodeFrom: 403, CodeTo: 403, Action: action}
+			if action == StatusCodeActionCooldown {
+				rule.Cooldown = 2 * time.Minute
+			}
+
+			entry, changed := store.Apply("plat-1", ip, rule, 403, "node-b", retriggeredAt)
+			if !changed {
+				t.Fatal("a match at cooldown expiry should create a new exclusion without an expiry sweep")
+			}
+			if entry.Action != action || entry.StatusCode != 403 || entry.NodeHash != "node-b" || !entry.CreatedAt.Equal(retriggeredAt) {
+				t.Fatalf("expected a fresh exclusion for the new match, got %+v", entry)
+			}
+			if !store.Excluded("plat-1", ip, retriggeredAt) {
+				t.Fatal("the new exclusion must take effect immediately")
+			}
+			if action == StatusCodeActionCooldown {
+				if !entry.ExpiresAt.Equal(retriggeredAt.Add(rule.Cooldown)) {
+					t.Fatalf("new cooldown expires at %v, want %v", entry.ExpiresAt, retriggeredAt.Add(rule.Cooldown))
+				}
+			} else if !entry.ExpiresAt.IsZero() || !store.Excluded("plat-1", ip, retriggeredAt.Add(24*time.Hour)) {
+				t.Fatalf("new blacklist must be permanent, got %+v", entry)
+			}
+			if entries := store.List("plat-1"); len(entries) != 1 {
+				t.Fatalf("expected one replacement exclusion, got %+v", entries)
+			}
+		})
+	}
+}
+
 func TestGuardStore_BlacklistUpgradesAndWins(t *testing.T) {
 	store := NewGuardStore()
 	now := time.Now()

@@ -19,8 +19,8 @@ var randomRouteRNGPool = sync.Pool{
 }
 
 // randomRoute selects a routable node using P2C with latency/load scoring.
-// It intentionally trusts Platform.View as the routable source of truth and
-// does not do extra pool scans/availability validation on the hot path.
+// It uses Platform.View for routability, checking live egress exclusions to
+// cover the interval before asynchronous view rebuilds.
 // Post-pick race handling (node removed right after selection) is handled by
 // the caller in RouteRequest.
 func randomRoute(
@@ -40,8 +40,37 @@ func randomRoute(
 	rng := randomRouteRNGPool.Get().(*rand.Rand)
 	defer randomRouteRNGPool.Put(rng)
 
+	_, checkExclusions := pool.(egressExclusionChecker)
 	pick := func() (node.Hash, bool) {
-		return view.RandomPick(rng)
+		h, ok := view.RandomPick(rng)
+		if !ok {
+			return node.Zero, false
+		}
+		if !checkExclusions {
+			return h, true
+		}
+		entry, exists := pool.GetEntry(h)
+		if !exists || !isEgressExcluded(pool, plat.ID, entry.GetEgressIP()) {
+			return h, true
+		}
+
+		// Only scan the view when a sampled node has a live exclusion. A
+		// bounded retry can incorrectly report no nodes when most of a stale
+		// view is excluded; reservoir sampling still finds any eligible node.
+		var selected node.Hash
+		count := 0
+		view.Range(func(candidate node.Hash) bool {
+			entry, exists := pool.GetEntry(candidate)
+			if !exists || isEgressExcluded(pool, plat.ID, entry.GetEgressIP()) {
+				return true
+			}
+			count++
+			if rng.IntN(count) == 0 {
+				selected = candidate
+			}
+			return true
+		})
+		return selected, count > 0
 	}
 
 	// Pick 1st candidate.

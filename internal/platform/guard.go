@@ -95,8 +95,9 @@ func (s *GuardStore) Excluded(platformID string, ip netip.Addr, now time.Time) b
 }
 
 // Apply records a rule match. It returns the new or upgraded entry and whether
-// state changed. Repeated cooldown matches are no-ops (the first trigger wins);
-// a blacklist upgrades an existing cooldown and is otherwise idempotent.
+// state changed. Repeated matches during an active cooldown are no-ops (the
+// first trigger wins); an expired cooldown can match again before expiry cleanup.
+// A blacklist upgrades an existing cooldown and is otherwise idempotent.
 func (s *GuardStore) Apply(
 	platformID string,
 	ip netip.Addr,
@@ -119,18 +120,22 @@ func (s *GuardStore) Apply(
 	}
 
 	if existing, ok := platformEntries[ip]; ok {
-		if existing.Action == StatusCodeActionBlacklist {
+		if existing.IsExpired(now) {
+			delete(platformEntries, ip)
+		} else {
+			if existing.Action == StatusCodeActionBlacklist {
+				return Exclusion{}, false
+			}
+			if rule.Action == StatusCodeActionBlacklist {
+				existing.Action = StatusCodeActionBlacklist
+				existing.StatusCode = statusCode
+				existing.NodeHash = nodeHash
+				existing.ExpiresAt = time.Time{}
+				platformEntries[ip] = existing
+				return existing, true
+			}
 			return Exclusion{}, false
 		}
-		if rule.Action == StatusCodeActionBlacklist {
-			existing.Action = StatusCodeActionBlacklist
-			existing.StatusCode = statusCode
-			existing.NodeHash = nodeHash
-			existing.ExpiresAt = time.Time{}
-			platformEntries[ip] = existing
-			return existing, true
-		}
-		return Exclusion{}, false
 	}
 
 	if len(platformEntries) >= MaxPlatformExclusions {

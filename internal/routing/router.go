@@ -26,6 +26,17 @@ type PoolAccessor interface {
 	RangePlatforms(fn func(*platform.Platform) bool)
 }
 
+// Platform views are rebuilt asynchronously. Consult live exclusions as well
+// so status-code rules take effect before the next rebuild.
+type egressExclusionChecker interface {
+	IsPlatformEgressExcluded(platformID string, ip netip.Addr) bool
+}
+
+func isEgressExcluded(pool PoolAccessor, platformID string, ip netip.Addr) bool {
+	checker, ok := pool.(egressExclusionChecker)
+	return ok && checker.IsPlatformEgressExcluded(platformID, ip)
+}
+
 // Router handles route selection and lease management.
 type Router struct {
 	pool            PoolAccessor
@@ -255,7 +266,8 @@ func (r *Router) tryLeaseHit(
 	nowNs int64,
 ) (Lease, RouteResult, bool) {
 	entry, ok := r.pool.GetEntry(current.NodeHash)
-	if !ok || !plat.View().Contains(current.NodeHash) || entry.GetEgressIP() != current.EgressIP {
+	if !ok || !plat.View().Contains(current.NodeHash) || entry.GetEgressIP() != current.EgressIP ||
+		isEgressExcluded(r.pool, plat.ID, current.EgressIP) {
 		return Lease{}, RouteResult{}, false
 	}
 
@@ -419,6 +431,10 @@ func chooseSameIPRotationCandidate(
 	authorities []string,
 	window time.Duration,
 ) (node.Hash, bool) {
+	if isEgressExcluded(pool, plat.ID, targetIP) {
+		return node.Zero, false
+	}
+
 	bestKnownHash := node.Zero
 	bestKnownLatency := time.Duration(math.MaxInt64)
 	fallbackHash := node.Zero

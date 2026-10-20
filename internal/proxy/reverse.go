@@ -361,7 +361,7 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			lifecycle.setHTTPStatus(resp.StatusCode)
 			lifecycle.addIngressBytes(headerWireLen(resp.Header))
 			if hasRoute {
-				recordUpstreamStatusAsync(p.health, route, resp.StatusCode)
+				recordUpstreamStatus(p.health, route, resp.StatusCode)
 			}
 			if resp.StatusCode == http.StatusSwitchingProtocols {
 				// 101 upgrade responses require a writable backend body

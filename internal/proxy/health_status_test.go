@@ -3,7 +3,6 @@ package proxy
 import (
 	"net/netip"
 	"testing"
-	"time"
 
 	"github.com/Resinat/Resin/internal/node"
 	"github.com/Resinat/Resin/internal/routing"
@@ -40,12 +39,12 @@ func (m *mockUpstreamStatusRecorder) RecordUpstreamStatus(
 	}
 }
 
-func TestRecordUpstreamStatusAsync_DispatchesWithoutGlobalHealth(t *testing.T) {
+func TestRecordUpstreamStatus_CommitsWithoutGlobalHealth(t *testing.T) {
 	rec := &mockUpstreamStatusRecorder{hasRules: true, calls: make(chan upstreamStatusCall, 1)}
 	h := node.HashFromRawOptions([]byte(`{"type":"ss","n":"status"}`))
 	ip := netip.MustParseAddr("203.0.113.40")
 
-	recordUpstreamStatusAsync(rec, routing.RouteResult{
+	recordUpstreamStatus(rec, routing.RouteResult{
 		PlatformID: "plat-1",
 		NodeHash:   h,
 		EgressIP:   ip,
@@ -56,8 +55,8 @@ func TestRecordUpstreamStatusAsync_DispatchesWithoutGlobalHealth(t *testing.T) {
 		if call.platformID != "plat-1" || call.hash != h || call.egressIP != ip || call.statusCode != 429 {
 			t.Fatalf("unexpected status call: %+v", call)
 		}
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("timed out waiting for upstream status")
+	default:
+		t.Fatal("upstream status must be recorded before returning")
 	}
 
 	if rec.resultCalls.Load() != 0 {
@@ -65,12 +64,12 @@ func TestRecordUpstreamStatusAsync_DispatchesWithoutGlobalHealth(t *testing.T) {
 	}
 }
 
-func TestRecordUpstreamStatusAsync_SkipsMissingIdentity(t *testing.T) {
+func TestRecordUpstreamStatus_SkipsMissingIdentity(t *testing.T) {
 	rec := &mockUpstreamStatusRecorder{hasRules: true, calls: make(chan upstreamStatusCall, 1)}
 	h := node.HashFromRawOptions([]byte(`{"type":"ss","n":"status-skip"}`))
 
-	recordUpstreamStatusAsync(rec, routing.RouteResult{NodeHash: h}, 403)
-	recordUpstreamStatusAsync(rec, routing.RouteResult{
+	recordUpstreamStatus(rec, routing.RouteResult{NodeHash: h}, 403)
+	recordUpstreamStatus(rec, routing.RouteResult{
 		PlatformID: "plat-1",
 		NodeHash:   h,
 		EgressIP:   netip.Addr{},
@@ -79,15 +78,15 @@ func TestRecordUpstreamStatusAsync_SkipsMissingIdentity(t *testing.T) {
 	select {
 	case call := <-rec.calls:
 		t.Fatalf("unexpected status call: %+v", call)
-	case <-time.After(50 * time.Millisecond):
+	default:
 	}
 }
 
-func TestRecordUpstreamStatusAsync_SkipsPlatformWithoutRules(t *testing.T) {
+func TestRecordUpstreamStatus_SkipsPlatformWithoutRules(t *testing.T) {
 	rec := &mockUpstreamStatusRecorder{hasRules: false, calls: make(chan upstreamStatusCall, 1)}
 	h := node.HashFromRawOptions([]byte(`{"type":"ss","n":"status-no-rules"}`))
 
-	recordUpstreamStatusAsync(rec, routing.RouteResult{
+	recordUpstreamStatus(rec, routing.RouteResult{
 		PlatformID: "plat-1",
 		NodeHash:   h,
 		EgressIP:   netip.MustParseAddr("203.0.113.42"),
@@ -96,16 +95,16 @@ func TestRecordUpstreamStatusAsync_SkipsPlatformWithoutRules(t *testing.T) {
 	select {
 	case call := <-rec.calls:
 		t.Fatalf("unexpected status call for rule-less platform: %+v", call)
-	case <-time.After(50 * time.Millisecond):
+	default:
 	}
 }
 
-func TestRecordUpstreamStatusAsync_RecorderWithoutInterface(t *testing.T) {
+func TestRecordUpstreamStatus_RecorderWithoutInterface(t *testing.T) {
 	rec := &mockHealthRecorder{}
 	h := node.HashFromRawOptions([]byte(`{"type":"ss","n":"status-plain"}`))
 
 	// Must not panic or fall back to global health recording.
-	recordUpstreamStatusAsync(rec, routing.RouteResult{
+	recordUpstreamStatus(rec, routing.RouteResult{
 		PlatformID: "plat-1",
 		NodeHash:   h,
 		EgressIP:   netip.MustParseAddr("203.0.113.41"),
