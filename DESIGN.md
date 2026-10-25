@@ -327,6 +327,8 @@ Resin 从订阅中获取节点配置。
 
 `mieru` 为 Resin 注册的自定义出站类型，使用官方 `github.com/enfein/mieru/v3` 客户端，而非依赖 sing-box 原生协议支持。Clash/Mihomo 的 `port`、`handshake-mode` 分别转换为 `server_port`、`handshake_mode`，保留 `username`、`password`、`multiplexing`，并将外层 `transport` 规范为 `tcp` 或 `udp`。出站提供 TCP 和 UDP 目标拨号，外层 TCP 仍可承载 WARP 所需的 UDP；节点关闭时释放客户端及其借出的连接。
 
+WARP 前置调度保留轮转游标，按 slot、地址族、前置哈希遍历，避免慢失败超过冷却时间后重新从首节点扫描而饿死后续前置。普通连接失败终止当前候选，只有出口 IP 重复才消耗去重重连预算；前置连续失败三次后暂停三十分钟。验证错误只输出端点、HTTP 阶段、外层包计数及 WireGuard IPC 白名单数值，不输出 IPC 原文、密钥或设备凭据。Cloudflare API 返回的备用端口纳入候选；IPv6 出口验证交错尝试 IPv6/IPv4 外层端点，避免耗尽预算前没有尝试 IPv4 外层。
+
 统一使用 `ParseGeneralSubscription` 作为订阅解析入口。
 
 #### 订阅的更新

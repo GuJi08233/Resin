@@ -44,6 +44,14 @@ func (e *userspaceEndpoint) Close() error {
 	return nil
 }
 
+func (e *userspaceEndpoint) diagnostics() tunnelDiagnostics {
+	raw, err := e.wireguard.IpcGet()
+	if err != nil {
+		return tunnelDiagnostics{}
+	}
+	return parseTunnelDiagnostics(raw)
+}
+
 func createEndpoint(ctx context.Context, parent adapter.Outbound, reg registration, addresses []netip.Prefix, endpoint netip.AddrPort) (tunnelEndpoint, error) {
 	return NewUserspaceEndpoint(wg.EndpointOptions{
 		Context: ctx, Logger: log.NewNOPFactory().NewLogger("warp"), MTU: 1280,

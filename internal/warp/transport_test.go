@@ -286,7 +286,7 @@ func TestIPv6ExitsPreferIPv6OuterEndpointsWithIPv4Fallback(t *testing.T) {
 	mappedV4 := netip.MustParseAddrPort("[::ffff:162.159.192.2]:2408")
 	original := []netip.AddrPort{v4First, v6First, v4Second, v6Second, mappedV4}
 	unchanged := slices.Clone(original)
-	wantIPv6 := []netip.AddrPort{v6First, v6Second, v4First, v4Second, mappedV4}
+	wantIPv6 := []netip.AddrPort{v6First, v4First, v6Second, v4Second, mappedV4}
 	if got := orderedEndpoints(IPv6, original); !slices.Equal(got, wantIPv6) {
 		t.Fatalf("IPv6 endpoint order = %v, want %v", got, wantIPv6)
 	}
@@ -298,5 +298,28 @@ func TestIPv6ExitsPreferIPv6OuterEndpointsWithIPv4Fallback(t *testing.T) {
 	}
 	if got := orderedEndpoints(IPv6, nil); len(got) != 0 {
 		t.Fatalf("unexpected endpoints for empty input: %v", got)
+	}
+}
+
+func TestIPv6EndpointPortsCannotStarveIPv4Fallback(t *testing.T) {
+	var endpoints []netip.AddrPort
+	ports := []uint16{2408, 500, 1701, 4500, 8443}
+	for _, port := range ports {
+		endpoints = append(endpoints, netip.AddrPortFrom(netip.MustParseAddr("2606:4700:d0::1"), port))
+	}
+	for _, port := range ports {
+		endpoints = append(endpoints, netip.AddrPortFrom(netip.MustParseAddr("162.159.192.1"), port))
+	}
+	ordered := orderedEndpoints(IPv6, endpoints)
+	if len(ordered) != len(endpoints) || !ordered[0].Addr().Is6() || !ordered[1].Addr().Is4() {
+		t.Fatalf("first two endpoint attempts must cover both outer families: %v", ordered)
+	}
+	for index, port := range ports {
+		if got := ordered[2*index]; !got.Addr().Is6() || got.Port() != port {
+			t.Fatalf("IPv6 port order changed at %d: %s", index, got)
+		}
+		if got := ordered[2*index+1]; !got.Addr().Is4() || got.Port() != port {
+			t.Fatalf("IPv4 port order changed at %d: %s", index, got)
+		}
 	}
 }

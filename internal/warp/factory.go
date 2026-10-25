@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/netip"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -28,7 +29,13 @@ const (
 	IPv6 Family = "ipv6"
 )
 
-type Factory struct{ registrar *registrar }
+type Factory struct {
+	registrar *registrar
+	// Internal seams keep endpoint failure/cancellation tests independent of
+	// device registration and public network access.
+	openTunnel func(adapter.Outbound, Family, registration, []netip.Prefix, netip.AddrPort) (*Exit, error)
+	verifyExit func(context.Context, *Exit) error
+}
 
 func NewFactory() *Factory {
 	return &Factory{registrar: &registrar{base: apiBase, gap: 12 * time.Second}}
@@ -59,6 +66,10 @@ func (f *Factory) Create(ctx context.Context, parent adapter.Outbound, family Fa
 	if err != nil {
 		return nil, err
 	}
+	return f.createRegistered(ctx, parent, family, reg)
+}
+
+func (f *Factory) createRegistered(ctx context.Context, parent adapter.Outbound, family Family, reg registration) (*Exit, error) {
 	var addresses []netip.Prefix
 	for _, address := range reg.addresses {
 		if (family == IPv4) == address.Addr().Is4() {
@@ -68,41 +79,83 @@ func (f *Factory) Create(ctx context.Context, parent adapter.Outbound, family Fa
 	if len(addresses) == 0 {
 		return nil, fmt.Errorf("WARP registration has no %s interface address", family)
 	}
-	var lastErr error
+	open := f.openTunnel
+	if open == nil {
+		open = newTunnel
+	}
+	verify := f.verifyExit
+	if verify == nil {
+		verify = func(ctx context.Context, exit *Exit) error { return exit.verify(ctx) }
+	}
+	var firstErr, lastErr error
+	attempts := 0
+	recordFailure := func(endpoint netip.AddrPort, phase string, err error) {
+		if phase == "verify" {
+			// verify already reports the precise TCP/TLS/HTTP phase.
+			lastErr = fmt.Errorf("endpoint=%s: %w", endpoint, err)
+		} else {
+			lastErr = fmt.Errorf("endpoint=%s phase=%s: %w", endpoint, phase, err)
+		}
+		if firstErr == nil {
+			firstErr = lastErr
+		}
+	}
 	for _, endpoint := range orderedEndpoints(family, reg.endpoints) {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			if lastErr == nil {
+				return nil, fmt.Errorf("verify WARP %s through parent attempts=%d: %w", family, attempts, err)
+			}
+			break
 		}
-		exit, err := newTunnel(parent, family, reg, addresses, endpoint)
+		attempts++
+		exit, err := open(parent, family, reg, addresses, endpoint)
 		if err != nil {
-			lastErr = err
+			recordFailure(endpoint, "tunnel_create", err)
 			continue
 		}
 		probeCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
-		err = exit.verify(probeCtx)
+		err = verify(probeCtx, exit)
 		cancel()
 		if err == nil {
 			return exit, nil
 		}
+		recordFailure(endpoint, "verify", err)
 		exit.Close()
-		lastErr = err
 	}
-	return nil, fmt.Errorf("verify WARP %s through parent: %w", family, lastErr)
+	if lastErr == nil {
+		lastErr = errors.New("registration contains no usable WireGuard endpoints")
+	}
+	if attempts > 1 && firstErr != nil {
+		lastErr = fmt.Errorf("first=(%v) last=(%w)", firstErr, lastErr)
+	}
+	if err := ctx.Err(); err != nil {
+		lastErr = errors.Join(lastErr, err)
+	}
+	return nil, fmt.Errorf("verify WARP %s through parent attempts=%d: %w", family, attempts, lastErr)
 }
 
 func orderedEndpoints(family Family, endpoints []netip.AddrPort) []netip.AddrPort {
 	if family != IPv6 {
 		return endpoints
 	}
-	ordered := make([]netip.AddrPort, 0, len(endpoints))
+	var v4, v6 []netip.AddrPort
 	for _, endpoint := range endpoints {
 		if endpoint.Addr().Unmap().Is6() {
-			ordered = append(ordered, endpoint)
+			v6 = append(v6, endpoint)
+		} else {
+			v4 = append(v4, endpoint)
 		}
 	}
-	for _, endpoint := range endpoints {
-		if !endpoint.Addr().Unmap().Is6() {
-			ordered = append(ordered, endpoint)
+	// An IPv6 inner exit can use an IPv4 outer proxy path. Interleave the
+	// endpoint families so a larger advertised port list cannot consume the
+	// whole attempt budget before the IPv4 fallback is tried even once.
+	ordered := make([]netip.AddrPort, 0, len(endpoints))
+	for index := 0; index < max(len(v4), len(v6)); index++ {
+		if index < len(v6) {
+			ordered = append(ordered, v6[index])
+		}
+		if index < len(v4) {
+			ordered = append(ordered, v4[index])
 		}
 	}
 	return ordered
@@ -120,6 +173,7 @@ type Exit struct {
 	cancel    context.CancelFunc
 	closeOnce sync.Once
 	closeErr  error
+	outer     *outerDiagnostics
 }
 
 var _ adapter.Outbound = (*Exit)(nil)
@@ -132,12 +186,13 @@ type tunnelEndpoint interface {
 func newTunnel(parent adapter.Outbound, family Family, reg registration, addresses []netip.Prefix, endpoint netip.AddrPort) (*Exit, error) {
 	lifetime, cancel := context.WithCancel(context.Background())
 	lifetime = pause.WithDefaultManager(lifetime)
-	inner, err := createEndpoint(lifetime, parent, reg, addresses, endpoint)
+	outer := new(outerDiagnostics)
+	inner, err := createEndpoint(lifetime, &diagnosticParentOutbound{Outbound: parent, state: outer}, reg, addresses, endpoint)
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("create WARP tunnel: %w", err)
 	}
-	e := &Exit{Adapter: outbound.NewAdapter("warp", "warp-"+reg.id+"-"+string(family), []string{"tcp", "udp"}, nil), family: family, endpoint: inner, cancel: cancel}
+	e := &Exit{Adapter: outbound.NewAdapter("warp", "warp-"+reg.id+"-"+string(family), []string{"tcp", "udp"}, nil), family: family, endpoint: inner, cancel: cancel, outer: outer}
 	e.resolver = &net.Resolver{PreferGo: true, StrictErrors: true, Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
 		dns := M.ParseSocksaddr("1.1.1.1:53")
 		if family == IPv6 {
@@ -267,9 +322,22 @@ func (e *Exit) verifyWithClock(ctx context.Context, client *http.Client, target 
 	var handshakeStart time.Time
 	var handshakeLatency time.Duration
 	var handshakeMeasured bool
+	phase := "tcp_connect"
+	failure := func(err error) error {
+		traceMu.Lock()
+		failedPhase := phase
+		traceMu.Unlock()
+		return e.diagnosticError(failedPhase, err)
+	}
 	trace := &httptrace.ClientTrace{
+		GotConn: func(httptrace.GotConnInfo) {
+			traceMu.Lock()
+			phase = "http_request"
+			traceMu.Unlock()
+		},
 		TLSHandshakeStart: func() {
 			traceMu.Lock()
+			phase = "tls_handshake"
 			handshakeStart = now()
 			traceMu.Unlock()
 		},
@@ -278,23 +346,31 @@ func (e *Exit) verifyWithClock(ctx context.Context, client *http.Client, target 
 			if err == nil && !handshakeStart.IsZero() {
 				handshakeLatency = now().Sub(handshakeStart)
 				handshakeMeasured = true
+				phase = "http_request"
 			}
 			traceMu.Unlock()
+		},
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			if info.Err == nil {
+				traceMu.Lock()
+				phase = "http_headers"
+				traceMu.Unlock()
+			}
 		},
 	}
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
 	start := now()
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		return failure(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("WARP trace HTTP %d", resp.StatusCode)
+		return e.diagnosticError("http_headers", fmt.Errorf("WARP trace HTTP %d", resp.StatusCode))
 	}
 	address, err := parseTrace(resp.Body, e.family)
 	if err != nil {
-		return err
+		return e.diagnosticError("http_body", err)
 	}
 	e.EgressIP = address
 	traceMu.Lock()
@@ -310,4 +386,118 @@ func (e *Exit) verifyWithClock(ctx context.Context, client *http.Client, target 
 		e.Latency = time.Nanosecond
 	}
 	return nil
+}
+
+// tunnelDiagnostics contains only explicitly allowed numeric IPC fields. Never
+// attach the raw IpcGet output or any key material to an error or a log.
+type tunnelDiagnostics struct {
+	available     bool
+	handshakeUnix int64
+	rxBytes       uint64
+	txBytes       uint64
+}
+
+func parseTunnelDiagnostics(raw string) tunnelDiagnostics {
+	result := tunnelDiagnostics{available: true}
+	for _, line := range strings.Split(raw, "\n") {
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		switch key {
+		case "last_handshake_time_sec":
+			seconds, err := strconv.ParseInt(value, 10, 64)
+			if err == nil && seconds > result.handshakeUnix {
+				result.handshakeUnix = seconds
+			}
+		case "rx_bytes", "tx_bytes":
+			count, err := strconv.ParseUint(value, 10, 64)
+			if err == nil {
+				if key == "rx_bytes" {
+					result.rxBytes += count
+				} else {
+					result.txBytes += count
+				}
+			}
+		}
+	}
+	return result
+}
+
+func (e *Exit) diagnosticError(phase string, err error) error {
+	var state tunnelDiagnostics
+	if endpoint, ok := e.endpoint.(interface{ diagnostics() tunnelDiagnostics }); ok {
+		state = endpoint.diagnostics()
+	}
+	status := "unavailable"
+	if state.available {
+		status = "none"
+		if state.handshakeUnix > 0 {
+			status = "complete"
+		}
+	}
+	outer := ""
+	if e.outer != nil {
+		e.outer.mu.Lock()
+		outer = fmt.Sprintf(" outer_tx_packets=%d outer_rx_packets=%d", e.outer.txPackets, e.outer.rxPackets)
+		if e.outer.lastError != nil {
+			outer += fmt.Sprintf(" outer_last_op=%s outer_last_error=%q", e.outer.lastOp, e.outer.lastError.Error())
+		}
+		e.outer.mu.Unlock()
+	}
+	return fmt.Errorf("phase=%s wg_handshake=%s handshake_unix=%d rx_bytes=%d tx_bytes=%d%s: %w",
+		phase, status, state.handshakeUnix, state.rxBytes, state.txBytes, outer, err)
+}
+
+type outerDiagnostics struct {
+	mu                   sync.Mutex
+	txPackets, rxPackets uint64
+	lastOp               string
+	lastError            error
+}
+
+func (d *outerDiagnostics) record(operation string, transferred bool, err error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if transferred {
+		if operation == "read" {
+			d.rxPackets++
+		} else if operation == "write" {
+			d.txPackets++
+		}
+	}
+	if err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, context.Canceled) {
+		d.lastOp, d.lastError = operation, err
+	}
+}
+
+type diagnosticParentOutbound struct {
+	adapter.Outbound
+	state *outerDiagnostics
+}
+
+func (p *diagnosticParentOutbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+	packet, err := p.Outbound.ListenPacket(ctx, destination)
+	p.state.record("listen_packet", false, err)
+	if err != nil {
+		return nil, err
+	}
+	return &diagnosticPacketConn{PacketConn: packet, state: p.state}, nil
+}
+
+type diagnosticPacketConn struct {
+	net.PacketConn
+	state *outerDiagnostics
+}
+
+func (p *diagnosticPacketConn) ReadFrom(buffer []byte) (int, net.Addr, error) {
+	n, address, err := p.PacketConn.ReadFrom(buffer)
+	p.state.record("read", n > 0, err)
+	return n, address, err
+}
+
+func (p *diagnosticPacketConn) WriteTo(buffer []byte, address net.Addr) (int, error) {
+	n, err := p.PacketConn.WriteTo(buffer, address)
+	p.state.record("write", n > 0, err)
+	return n, err
 }

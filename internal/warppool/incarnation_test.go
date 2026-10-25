@@ -7,12 +7,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Resinat/Resin/internal/config"
 	"github.com/Resinat/Resin/internal/warp"
 	"github.com/sagernet/sing-box/adapter"
 )
 
 func TestReconnectSeparatesOldProbeAndRequestFeedback(t *testing.T) {
 	f := newPoolFixture(t)
+	f.configure(func(cfg *config.RuntimeConfig) { cfg.WarpMaxNodes = 1 })
 	calls := 0
 	mgr := f.manager(t, func(context.Context, adapter.Outbound, warp.Family) (Candidate, error) {
 		calls++

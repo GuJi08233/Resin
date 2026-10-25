@@ -13,6 +13,8 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +24,21 @@ import (
 )
 
 const apiBase = "https://api.cloudflareclient.com/v0i1909051800"
+
+const maxEndpointCandidates = 64
+
+var fallbackEndpoints = []netip.AddrPort{
+	netip.MustParseAddrPort("162.159.192.1:2408"),
+	netip.MustParseAddrPort("[2606:4700:d0::a29f:c001]:2408"),
+	netip.MustParseAddrPort("162.159.193.1:2408"),
+}
+
+type registrationEndpoint struct {
+	V4    string `json:"v4"`
+	V6    string `json:"v6"`
+	Host  string `json:"host"`
+	Ports []int  `json:"ports"`
+}
 
 type registration struct {
 	id, privateKey, peerKey string
@@ -122,29 +139,137 @@ func (r *registrar) register(ctx context.Context, parent adapter.Outbound) (regi
 	if decoded, err := base64.StdEncoding.DecodeString(current.Config.ClientID); err == nil && len(decoded) == 3 {
 		reg.reserved = decoded
 	}
-	for _, raw := range []string{peer.Endpoint.V4, peer.Endpoint.V6} {
-		if endpoint, err := parseEndpoint(raw); err == nil {
-			reg.endpoints = append(reg.endpoints, endpoint)
-		}
-	}
-	// Numeric endpoints avoid host DNS and work when the API returns only a hostname.
-	for _, raw := range []string{"162.159.192.1:2408", "[2606:4700:d0::a29f:c001]:2408", "162.159.193.1:2408"} {
-		endpoint := netip.MustParseAddrPort(raw)
-		found := false
-		for _, existing := range reg.endpoints {
-			if existing == endpoint {
-				found = true
-				break
-			}
-		}
-		if !found {
-			reg.endpoints = append(reg.endpoints, endpoint)
-		}
-	}
+	reg.endpoints = endpointCandidates(ctx, client, peer.Endpoint)
 	if key, err := base64.StdEncoding.DecodeString(reg.peerKey); err != nil || len(key) != 32 {
 		return registration{}, errors.New("WARP configuration contains an invalid peer key")
 	}
 	return reg, nil
+}
+
+// endpointCandidates preserves the API's numeric endpoints before alternate
+// ports. A host-only response is resolved over the same parent-backed HTTP
+// client as registration, never through the host's default DNS resolver.
+func endpointCandidates(ctx context.Context, client *http.Client, endpoint registrationEndpoint) []netip.AddrPort {
+	bases := make([]netip.AddrPort, 0, 4)
+	for _, raw := range []string{endpoint.V4, endpoint.V6, endpoint.Host} {
+		if parsed, err := parseEndpoint(raw); err == nil {
+			bases = append(bases, netip.AddrPortFrom(parsed.Addr().Unmap(), parsed.Port()))
+		}
+	}
+	if len(bases) == 0 {
+		if host, port, ok := endpointHostname(endpoint.Host); ok {
+			for _, address := range resolveEndpointHost(ctx, client, host) {
+				bases = append(bases, netip.AddrPortFrom(address, port))
+			}
+		}
+	}
+	result := make([]netip.AddrPort, 0, min(maxEndpointCandidates, len(bases)*(len(endpoint.Ports)+2)+len(fallbackEndpoints)))
+	seen := make(map[netip.AddrPort]bool)
+	appendCandidate := func(candidate netip.AddrPort, limit int) {
+		if !candidate.IsValid() || candidate.Port() == 0 || seen[candidate] || len(result) >= limit {
+			return
+		}
+		seen[candidate] = true
+		result = append(result, candidate)
+	}
+	// Leave room for the known fallback addresses even in a large API response.
+	apiLimit := maxEndpointCandidates - len(fallbackEndpoints)
+	for _, base := range bases {
+		appendCandidate(base, apiLimit)
+	}
+	ports := append([]int{2408}, endpoint.Ports...)
+	for _, port := range ports {
+		if port < 1 || port > 65535 {
+			continue
+		}
+		for _, base := range bases {
+			appendCandidate(netip.AddrPortFrom(base.Addr(), uint16(port)), apiLimit)
+		}
+		if len(result) >= apiLimit {
+			break
+		}
+	}
+	for _, fallback := range fallbackEndpoints {
+		appendCandidate(fallback, maxEndpointCandidates)
+	}
+	return result
+}
+
+func endpointHostname(raw string) (string, uint16, bool) {
+	host := strings.TrimSpace(raw)
+	port := uint16(2408)
+	if parsedHost, parsedPort, err := net.SplitHostPort(host); err == nil {
+		number, err := strconv.Atoi(parsedPort)
+		if err != nil || number < 1 || number > 65535 {
+			return "", 0, false
+		}
+		host, port = parsedHost, uint16(number)
+	}
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	if len(host) == 0 || len(host) > 253 {
+		return "", 0, false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return "", 0, false
+		}
+		for _, ch := range label {
+			if !(ch >= 'a' && ch <= 'z' || ch >= '0' && ch <= '9' || ch == '-') {
+				return "", 0, false
+			}
+		}
+	}
+	return host, port, true
+}
+
+func resolveEndpointHost(ctx context.Context, client *http.Client, host string) []netip.Addr {
+	if client == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	var addresses []netip.Addr
+	for _, family := range []struct {
+		name string
+		kind int
+	}{{"A", 1}, {"AAAA", 28}} {
+		if ctx.Err() != nil {
+			break
+		}
+		target := "https://1.1.1.1/dns-query?" + url.Values{"name": {host}, "type": {family.name}}.Encode()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+		if err != nil {
+			continue
+		}
+		req.Header.Set("Accept", "application/dns-json")
+		response, err := client.Do(req)
+		if err != nil {
+			continue
+		}
+		var reply struct {
+			Status int `json:"Status"`
+			Answer []struct {
+				Type int    `json:"type"`
+				Data string `json:"data"`
+			} `json:"Answer"`
+		}
+		decodeErr := json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&reply)
+		response.Body.Close()
+		if response.StatusCode != http.StatusOK || decodeErr != nil || reply.Status != 0 {
+			continue
+		}
+		for _, answer := range reply.Answer {
+			address, err := netip.ParseAddr(strings.TrimSpace(answer.Data))
+			if err != nil || answer.Type != family.kind || (family.kind == 1) != address.Unmap().Is4() {
+				continue
+			}
+			addresses = append(addresses, address.Unmap())
+			if len(addresses) >= maxEndpointCandidates-len(fallbackEndpoints) {
+				return addresses
+			}
+		}
+	}
+	return addresses
 }
 
 func parseEndpoint(value string) (netip.AddrPort, error) {
@@ -219,13 +344,8 @@ type device struct {
 			} `json:"addresses"`
 		} `json:"interface"`
 		Peers []struct {
-			PublicKey string `json:"public_key"`
-			Endpoint  struct {
-				V4    string `json:"v4"`
-				V6    string `json:"v6"`
-				Host  string `json:"host"`
-				Ports []int  `json:"ports"`
-			} `json:"endpoint"`
+			PublicKey string               `json:"public_key"`
+			Endpoint  registrationEndpoint `json:"endpoint"`
 		} `json:"peers"`
 	} `json:"config"`
 }

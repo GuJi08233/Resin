@@ -4,6 +4,7 @@ package warppool
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/netip"
@@ -55,6 +56,16 @@ type managedExit struct {
 	via    *adapter.Outbound
 }
 
+const (
+	parentFailureLimit    = 3
+	parentFailureCooldown = 30 * time.Minute
+)
+
+type parentFailure struct {
+	consecutive int
+	retryAt     time.Time
+}
+
 type settings struct {
 	enabled bool
 	stack   string
@@ -66,14 +77,17 @@ type settings struct {
 // Manager owns tunnel creation and retirement. All map mutations are serialized
 // on its worker; parent deletion can independently remove entries from the pool.
 type Manager struct {
-	opts    Options
-	active  map[slot]managedExit
-	nextTry map[slot]time.Time
-	mu      sync.Mutex
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
-	started bool
-	stopped bool
+	opts           Options
+	active         map[slot]managedExit
+	nextTry        map[slot]time.Time
+	parentFailures map[node.Hash]parentFailure
+	lastAttempt    slot
+	hasLastAttempt bool
+	mu             sync.Mutex
+	cancel         context.CancelFunc
+	wg             sync.WaitGroup
+	started        bool
+	stopped        bool
 }
 
 func NewManager(opts Options) *Manager {
@@ -90,7 +104,7 @@ func NewManager(opts Options) *Manager {
 			return Candidate{Outbound: exit, IP: exit.EgressIP, Latency: exit.Latency}, nil
 		}
 	}
-	return &Manager{opts: opts, active: make(map[slot]managedExit), nextTry: make(map[slot]time.Time)}
+	return &Manager{opts: opts, active: make(map[slot]managedExit), nextTry: make(map[slot]time.Time), parentFailures: make(map[node.Hash]parentFailure)}
 }
 
 func (m *Manager) currentSettings() settings {
@@ -162,6 +176,8 @@ func (m *Manager) clear() {
 		m.remove(key)
 	}
 	clear(m.nextTry)
+	clear(m.parentFailures)
+	m.hasLastAttempt = false
 }
 
 func (s settings) accepts(family warp.Family) bool {
@@ -273,23 +289,65 @@ func (m *Manager) reconcile(ctx context.Context) {
 			delete(m.nextTry, key)
 		}
 	}
-	// Round-robin slots across parents before allocating another tunnel per
-	// family. A failed/duplicate slot is cooled down so other parents progress.
+	for hash, failure := range m.parentFailures {
+		if _, exists := m.opts.Pool.GetEntry(hash); !exists || (!failure.retryAt.IsZero() && !time.Now().Before(failure.retryAt)) {
+			delete(m.parentFailures, hash)
+		}
+	}
+	// Keep a persistent cursor. A slow failed candidate can outlive a previous
+	// slot's cooldown; restarting from the first hash would starve later nodes.
+	// Try every parent before moving to the other family or another slot.
+	var first, after slot
+	foundFirst, foundAfter := false, false
+findCandidate:
 	for index := 0; index < rounds; index++ {
-		for _, parent := range parents {
-			for _, family := range []warp.Family{warp.IPv4, warp.IPv6} {
+		for _, family := range []warp.Family{warp.IPv4, warp.IPv6} {
+			for _, parent := range parents {
 				if !cfg.accepts(family) {
+					continue
+				}
+				if time.Now().Before(m.parentFailures[parent.Hash].retryAt) {
 					continue
 				}
 				key := slot{parent.Hash, family, index}
 				if _, exists := m.active[key]; exists || time.Now().Before(m.nextTry[key]) {
 					continue
 				}
-				m.create(ctx, cfg, key, parent)
-				return // bound background work and recheck config before next slot
+				if !foundFirst {
+					first, foundFirst = key, true
+				}
+				if !foundAfter && (!m.hasLastAttempt || compareSlots(key, m.lastAttempt) > 0) {
+					after, foundAfter = key, true
+					break findCandidate
+				}
 			}
 		}
 	}
+	if !foundAfter {
+		after, foundAfter = first, foundFirst
+	}
+	if foundAfter {
+		if parent, live := m.opts.Pool.GetEntry(after.parent); live && m.eligible(parent) {
+			m.lastAttempt, m.hasLastAttempt = after, true
+			m.create(ctx, cfg, after, parent)
+		}
+	}
+}
+
+func compareSlots(a, b slot) int {
+	if a.index != b.index {
+		if a.index < b.index {
+			return -1
+		}
+		return 1
+	}
+	if a.family != b.family {
+		if a.family == warp.IPv4 {
+			return -1
+		}
+		return 1
+	}
+	return slices.Compare(a.parent[:], b.parent[:])
 }
 
 // attemptContext cancels a registration promptly when settings change, so a
@@ -349,23 +407,40 @@ func (m *Manager) create(ctx context.Context, cfg settings, key slot, parent *no
 	if via == nil {
 		return
 	}
+	parentName := m.opts.Pool.ResolveNodeDisplayTag(parent.Hash)
+	if parentName == "" {
+		parentName = (*via).Tag()
+	}
+	parentContext := fmt.Sprintf("parent=%s name=%q protocol=%s family=%s slot=%d", parent.Hash.Hex(), parentName, (*via).Type(), key.family, key.index+1)
 	var best Candidate
 	defer func() { closeCandidate(best) }()
 	for attempt := 0; attempt < cfg.tries; attempt++ {
+		if managedSub != nil {
+			managedSub.LastCheckedNs.Store(time.Now().UnixNano())
+		}
 		attemptCtx, cancel := m.attemptContext(ctx, cfg)
 		candidate, err := m.opts.Create(attemptCtx, *via, key.family)
 		cancel()
 		if err != nil {
 			closeCandidate(candidate)
-			if managedSub != nil && ctx.Err() == nil {
-				managedSub.SetLastError(err.Error())
-			}
-			m.opts.Logf("WARP parent=%s family=%s slot=%d: %v", key.parent.Hex(), key.family, key.index+1, err)
 			if ctx.Err() != nil || m.currentSettings() != cfg {
 				return
 			}
-			continue
+			failure := m.parentFailures[parent.Hash]
+			failure.consecutive++
+			message := fmt.Sprintf("%s failures=%d/%d: %v", parentContext, failure.consecutive, parentFailureLimit, err)
+			if failure.consecutive >= parentFailureLimit {
+				failure.retryAt = time.Now().Add(parentFailureCooldown)
+				message += fmt.Sprintf("; parent paused until %s", failure.retryAt.Format(time.RFC3339))
+			}
+			m.parentFailures[parent.Hash] = failure
+			if managedSub != nil {
+				managedSub.SetLastError(message)
+			}
+			m.opts.Logf("WARP %s", message)
+			break // reconnect budget is for duplicate IPs, not broken transports
 		}
+		delete(m.parentFailures, parent.Hash)
 		candidate.IP = candidate.IP.Unmap()
 		if candidate.Outbound == nil || !candidate.IP.IsGlobalUnicast() ||
 			(key.family == warp.IPv4 && !candidate.IP.Is4()) ||
