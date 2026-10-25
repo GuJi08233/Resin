@@ -85,6 +85,11 @@ var runtimeConfigAllowedFields = map[string]bool{
 	"max_egress_test_interval":                 true,
 	"latency_test_url":                         true,
 	"latency_authorities":                      true,
+	"warp_enabled":                             true,
+	"warp_stack":                               true,
+	"warp_exits_per_family":                    true,
+	"warp_max_nodes":                           true,
+	"warp_reconnect_attempts":                  true,
 	"p2c_latency_window":                       true,
 	"latency_decay_window":                     true,
 	"cache_flush_interval":                     true,
@@ -189,11 +194,26 @@ func (s *ControlPlaneService) PatchRuntimeConfig(patchJSON json.RawMessage) (*co
 	// 6. Atomic swap.
 	s.RuntimeCfg.Store(newCfg)
 	s.configVersion = newVersion
+	s.syncWarpSubscriptionLocked()
 
 	return newCfg, nil
 }
 
 func validateRuntimeConfig(cfg *config.RuntimeConfig) *ServiceError {
+	switch cfg.WarpStack {
+	case "ipv4", "ipv6", "dual":
+	default:
+		return invalidArg("warp_stack: must be ipv4, ipv6, or dual")
+	}
+	if cfg.WarpMaxNodes < 1 || cfg.WarpMaxNodes > 1024 {
+		return invalidArg("warp_max_nodes: must be between 1 and 1024")
+	}
+	if cfg.WarpExitsPerFamily < 1 || cfg.WarpExitsPerFamily > 8 {
+		return invalidArg("warp_exits_per_family: must be between 1 and 8")
+	}
+	if cfg.WarpReconnectAttempts < 1 || cfg.WarpReconnectAttempts > 10 {
+		return invalidArg("warp_reconnect_attempts: must be between 1 and 10")
+	}
 	latencyURL := strings.TrimSpace(cfg.LatencyTestURL)
 	u, verr := parseHTTPAbsoluteURL("latency_test_url", latencyURL)
 	if verr != nil {

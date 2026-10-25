@@ -138,6 +138,64 @@ func TestPatchRuntimeConfig_HotUpdatePersistsAndSurvivesRestart(t *testing.T) {
 	}
 }
 
+func TestPatchRuntimeConfig_WarpPersistsAndCanBeDisabled(t *testing.T) {
+	h := newPatchHarness(t)
+	updated, err := h.cp.PatchRuntimeConfig([]byte(`{"warp_enabled":true,"warp_stack":"ipv6","warp_exits_per_family":2,"warp_max_nodes":64,"warp_reconnect_attempts":5}`))
+	if err != nil {
+		t.Fatalf("enable WARP: %v", err)
+	}
+	if !updated.WarpEnabled || updated.WarpStack != "ipv6" || updated.WarpExitsPerFamily != 2 || updated.WarpMaxNodes != 64 || updated.WarpReconnectAttempts != 5 {
+		t.Fatalf("unexpected WARP settings: %+v", updated)
+	}
+	if h.runtimeCfg.Load() != updated {
+		t.Fatal("live settings did not swap")
+	}
+	h.closeDB()
+	engine, closer, err := state.PersistenceBootstrap(h.stateDir, h.cacheDir)
+	if err != nil {
+		t.Fatalf("reopen state: %v", err)
+	}
+	defer closer.Close()
+	persisted, _, err := engine.GetSystemConfig()
+	if err != nil || !reflect.DeepEqual(persisted, updated) {
+		t.Fatalf("WARP settings did not survive restart: %+v, %v", persisted, err)
+	}
+	h.cp.Engine = engine
+	disabled, err := h.cp.PatchRuntimeConfig([]byte(`{"warp_enabled":false}`))
+	if err != nil {
+		t.Fatalf("disable WARP: %v", err)
+	}
+	if disabled.WarpEnabled || disabled.WarpStack != "ipv6" || disabled.WarpExitsPerFamily != 2 || disabled.WarpMaxNodes != 64 || disabled.WarpReconnectAttempts != 5 {
+		t.Fatalf("disable changed unrelated WARP settings: %+v", disabled)
+	}
+}
+
+func TestPatchRuntimeConfig_InvalidWarpSettingsDoNotApply(t *testing.T) {
+	h := newPatchHarness(t)
+	original := h.runtimeCfg.Load()
+	for _, patch := range []string{
+		`{"warp_stack":"auto"}`, `{"warp_stack":""}`, `{"warp_stack":null}`,
+		`{"warp_max_nodes":0}`, `{"warp_max_nodes":1025}`,
+		`{"warp_exits_per_family":0}`, `{"warp_exits_per_family":9}`,
+		`{"warp_reconnect_attempts":0}`, `{"warp_reconnect_attempts":11}`,
+		`{"warp_enabled":"true"}`, `{"warp_max_nodes":1.5}`,
+	} {
+		t.Run(patch, func(t *testing.T) {
+			_, err := h.cp.PatchRuntimeConfig([]byte(patch))
+			if err == nil {
+				t.Fatal("invalid WARP patch accepted")
+			}
+			if h.runtimeCfg.Load() != original {
+				t.Fatal("invalid patch changed live settings")
+			}
+			persisted, _, err := h.engine.GetSystemConfig()
+			if err != nil || persisted != nil {
+				t.Fatalf("invalid patch persisted settings: %+v, %v", persisted, err)
+			}
+		})
+	}
+}
+
 func TestPatchRuntimeConfig_InvalidPatchDoesNotPartiallyApply(t *testing.T) {
 	h := newPatchHarness(t)
 

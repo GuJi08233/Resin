@@ -115,6 +115,7 @@ func NewSingboxBuilderWithConfig(cfg SingboxBuilderConfig) (*SingboxBuilder, err
 	}
 
 	registry := service.FromContext[adapter.OutboundRegistry](ctx).(*sbOutbound.Registry)
+	registerMieruOutbound(registry)
 
 	return &SingboxBuilder{
 		registry:            registry,
@@ -138,14 +139,17 @@ func (b *SingboxBuilder) Build(rawOptions json.RawMessage) (adapter.Outbound, er
 
 	// 2. Create the outbound instance via the registry.
 	logger := b.logFactory.NewLogger("outbound/" + outboundConfig.Type)
-	ob, err := b.registry.CreateOutbound(
-		b.ctx,
-		nil, // router — not needed for simple dialing
-		logger,
-		outboundConfig.Tag,
-		outboundConfig.Type,
-		outboundConfig.Options,
-	)
+	ob, handled, err := b.buildWireGuardCompat(outboundConfig, logger)
+	if !handled {
+		ob, err = b.registry.CreateOutbound(
+			b.ctx,
+			nil, // router — not needed for simple dialing
+			logger,
+			outboundConfig.Tag,
+			outboundConfig.Type,
+			outboundConfig.Options,
+		)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("create outbound [%s]: %w", outboundConfig.Type, err)
 	}

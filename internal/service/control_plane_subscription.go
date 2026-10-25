@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Resinat/Resin/internal/config"
 	"github.com/Resinat/Resin/internal/model"
 	"github.com/Resinat/Resin/internal/node"
 	"github.com/Resinat/Resin/internal/state"
@@ -38,6 +39,46 @@ type SubscriptionResponse struct {
 	LastChecked             string `json:"last_checked,omitempty"`
 	LastUpdated             string `json:"last_updated,omitempty"`
 	LastError               string `json:"last_error,omitempty"`
+	Managed                 bool   `json:"managed,omitempty"`
+	MaxNodes                int    `json:"max_nodes,omitempty"`
+}
+
+// ensureWarpSubscription publishes the one runtime-only subscription. A read
+// never overwrites its node view, and legacy system-config writes share the
+// same lock and synchronization path as subscription settings.
+func (s *ControlPlaneService) ensureWarpSubscription() *subscription.Subscription {
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
+	return s.syncWarpSubscriptionLocked()
+}
+
+func (s *ControlPlaneService) runtimeConfigOrDefault() *config.RuntimeConfig {
+	if s.RuntimeCfg != nil {
+		if cfg := s.RuntimeCfg.Load(); cfg != nil {
+			return cfg
+		}
+	}
+	return config.NewDefaultRuntimeConfig()
+}
+
+func (s *ControlPlaneService) syncWarpSubscriptionLocked() *subscription.Subscription {
+	if s.SubMgr == nil {
+		return nil
+	}
+	cfg := s.runtimeConfigOrDefault()
+	sub := s.SubMgr.Lookup(subscription.WarpSubscriptionID)
+	if sub == nil {
+		sub = subscription.NewWarpSubscription(cfg.WarpEnabled)
+		s.SubMgr.Register(sub)
+		return sub
+	}
+	if sub.Enabled() != cfg.WarpEnabled {
+		sub.SetEnabled(cfg.WarpEnabled)
+		if s.Pool != nil {
+			s.Pool.RebuildAllPlatforms()
+		}
+	}
+	return sub
 }
 
 func (s *ControlPlaneService) subToResponse(sub *subscription.Subscription) SubscriptionResponse {
@@ -85,11 +126,18 @@ func (s *ControlPlaneService) subToResponse(sub *subscription.Subscription) Subs
 		resp.LastUpdated = time.Unix(0, lu).UTC().Format(time.RFC3339Nano)
 	}
 	resp.LastError = sub.GetLastError()
+	if sub.ID == subscription.WarpSubscriptionID {
+		cfg := s.runtimeConfigOrDefault()
+		resp.Managed = true
+		resp.MaxNodes = cfg.WarpMaxNodes
+		resp.Enabled = cfg.WarpEnabled
+	}
 	return resp
 }
 
 // ListSubscriptions returns all subscriptions, optionally filtered by enabled.
 func (s *ControlPlaneService) ListSubscriptions(enabled *bool) ([]SubscriptionResponse, error) {
+	s.ensureWarpSubscription()
 	var result []SubscriptionResponse
 	s.SubMgr.Range(func(id string, sub *subscription.Subscription) bool {
 		if enabled != nil && sub.Enabled() != *enabled {
@@ -106,6 +154,9 @@ func (s *ControlPlaneService) ListSubscriptions(enabled *bool) ([]SubscriptionRe
 
 // GetSubscription returns a single subscription by ID.
 func (s *ControlPlaneService) GetSubscription(id string) (*SubscriptionResponse, error) {
+	if id == subscription.WarpSubscriptionID {
+		s.ensureWarpSubscription()
+	}
 	sub := s.SubMgr.Lookup(id)
 	if sub == nil {
 		return nil, notFound("subscription not found")
@@ -149,6 +200,9 @@ func (s *ControlPlaneService) CreateSubscription(req CreateSubscriptionRequest) 
 		return nil, invalidArg("name is required")
 	}
 	name := strings.TrimSpace(*req.Name)
+	if strings.EqualFold(name, subscription.WarpSubscriptionName) {
+		return nil, invalidArg("name: WARP is reserved for the managed WARP subscription")
+	}
 
 	sourceType, verr := parseSubscriptionSourceType(req.SourceType)
 	if verr != nil {
@@ -256,6 +310,9 @@ func (s *ControlPlaneService) CreateSubscription(req CreateSubscriptionRequest) 
 // This is not RFC 7396 JSON Merge Patch: patch must be a non-empty object and
 // null values are rejected.
 func (s *ControlPlaneService) UpdateSubscription(id string, patchJSON json.RawMessage) (*SubscriptionResponse, error) {
+	if id == subscription.WarpSubscriptionID {
+		return s.updateWarpSubscription(patchJSON)
+	}
 	patch, verr := parseMergePatch(patchJSON)
 	if verr != nil {
 		return nil, verr
@@ -283,6 +340,9 @@ func (s *ControlPlaneService) UpdateSubscription(id string, patchJSON json.RawMe
 		return nil, err
 	} else if ok {
 		newName = nameStr
+		if strings.EqualFold(newName, subscription.WarpSubscriptionName) && newName != sub.Name() {
+			return nil, invalidArg("name: WARP is reserved for the managed WARP subscription")
+		}
 		if newName != sub.Name() {
 			nameChanged = true
 		}
@@ -407,6 +467,9 @@ func (s *ControlPlaneService) UpdateSubscription(id string, patchJSON json.RawMe
 
 // DeleteSubscription deletes a subscription and evicts its nodes.
 func (s *ControlPlaneService) DeleteSubscription(id string) error {
+	if id == subscription.WarpSubscriptionID {
+		return invalidArg("the managed WARP subscription cannot be deleted; disable it instead")
+	}
 	sub := s.SubMgr.Lookup(id)
 	if sub == nil {
 		return notFound("subscription not found")
@@ -454,6 +517,9 @@ func (s *ControlPlaneService) DeleteSubscription(id string) error {
 
 // RefreshSubscription triggers an immediate subscription refresh (blocks).
 func (s *ControlPlaneService) RefreshSubscription(id string) error {
+	if id == subscription.WarpSubscriptionID {
+		return invalidArg("WARP exits are maintained automatically and cannot be refreshed as subscription content")
+	}
 	sub := s.SubMgr.Lookup(id)
 	if sub == nil {
 		return notFound("subscription not found")
@@ -476,6 +542,9 @@ func (s *ControlPlaneService) cleanupSubscriptionCircuitOpenNodesWithHook(
 	id string,
 	betweenScans func(),
 ) (int, error) {
+	if id == subscription.WarpSubscriptionID {
+		return 0, invalidArg("WARP exits are maintained automatically; disable the subscription to release its nodes")
+	}
 	sub := s.SubMgr.Lookup(id)
 	if sub == nil {
 		return 0, notFound("subscription not found")
@@ -521,4 +590,38 @@ func shouldCleanupSubscriptionNode(entry *node.NodeEntry) bool {
 		return false
 	}
 	return entry.IsCircuitOpen() || (!entry.HasOutbound() && entry.GetLastError() != "")
+}
+
+func (s *ControlPlaneService) updateWarpSubscription(patchJSON json.RawMessage) (*SubscriptionResponse, error) {
+	patch, verr := parseMergePatch(patchJSON)
+	if verr != nil {
+		return nil, verr
+	}
+	if err := patch.validateFields(map[string]bool{"enabled": true, "max_nodes": true}, func(key string) string {
+		return fmt.Sprintf("field %q is read-only or unknown for the managed WARP subscription", key)
+	}); err != nil {
+		return nil, err
+	}
+	runtimePatch := make(map[string]any, len(patch))
+	if enabled, ok, err := patch.optionalBool("enabled"); err != nil {
+		return nil, err
+	} else if ok {
+		runtimePatch["warp_enabled"] = enabled
+	}
+	if limit, ok, err := patch.optionalInt("max_nodes"); err != nil {
+		return nil, err
+	} else if ok {
+		if limit < 1 || limit > 1024 {
+			return nil, invalidArg("max_nodes: must be between 1 and 1024")
+		}
+		runtimePatch["warp_max_nodes"] = limit
+	}
+	data, err := json.Marshal(runtimePatch)
+	if err != nil {
+		return nil, internal("encode WARP settings", err)
+	}
+	if _, err := s.PatchRuntimeConfig(data); err != nil {
+		return nil, err
+	}
+	return s.GetSubscription(subscription.WarpSubscriptionID)
 }

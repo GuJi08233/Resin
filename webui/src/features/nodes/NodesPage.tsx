@@ -533,6 +533,7 @@ export function NodesPage() {
       cell: (info) => (
         <div className="nodes-tag-cell">
           <span title={info.getValue() as string}>{info.getValue() as string}</span>
+          {info.row.original.warp_family ? <Badge variant="neutral">WARP-{info.row.original.warp_family}</Badge> : null}
         </div>
       ),
     }),
@@ -853,6 +854,12 @@ export function NodesPage() {
               <div>
                 <h3>{firstTag(detailNode)}</h3>
                 <p>{detailNode.node_hash}</p>
+                {detailNode.parent_hash ? (
+                  <p style={{ overflowWrap: "anywhere" }}>
+                    <Badge variant="neutral">WARP-{detailNode.warp_family}</Badge>
+                    {" · "}{t("父节点")}: <code>{detailNode.parent_hash}</code>
+                  </p>
+                ) : null}
               </div>
               <div className="drawer-header-actions">
                 <Button

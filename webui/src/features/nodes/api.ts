@@ -9,7 +9,9 @@ import type {
 
 const basePath = "/api/v1/nodes";
 
-type ApiNodeSummary = Omit<NodeSummary, "tags"> & {
+type ApiNodeSummary = Omit<NodeSummary, "tags" | "parent_hash" | "warp_family"> & {
+  parent_hash?: string | null;
+  warp_family?: string | null;
   tags?: NodeSummary["tags"] | null;
   enabled?: boolean | null;
   display_tag?: string | null;
@@ -28,6 +30,8 @@ function normalizeNode(raw: ApiNodeSummary): NodeSummary {
   const { reference_latency_ms, ...rest } = raw;
   const normalized: NodeSummary = {
     ...rest,
+    parent_hash: raw.parent_hash || "",
+    warp_family: raw.warp_family === "ipv4" || raw.warp_family === "ipv6" ? raw.warp_family : undefined,
     enabled: raw.enabled !== false,
     display_tag: raw.display_tag || "",
     tags: Array.isArray(raw.tags) ? raw.tags : [],

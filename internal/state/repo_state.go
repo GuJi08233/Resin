@@ -89,7 +89,7 @@ func (r *StateRepo) GetSystemConfig() (*config.RuntimeConfig, int, error) {
 		}
 		return nil, 0, fmt.Errorf("scan system_config: %w", err)
 	}
-	cfg := &config.RuntimeConfig{}
+	cfg := config.NewDefaultRuntimeConfig()
 	if err := json.Unmarshal([]byte(configJSON), cfg); err != nil {
 		return nil, 0, fmt.Errorf("unmarshal system_config: %w", err)
 	}

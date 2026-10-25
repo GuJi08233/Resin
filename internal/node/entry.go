@@ -37,6 +37,10 @@ type NodeEntry struct {
 	Hash       Hash
 	RawOptions json.RawMessage
 	CreatedAt  time.Time
+	// ParentHash identifies the original proxy behind a runtime-only WARP node.
+	// Both fields are immutable once the entry is published in the pool.
+	ParentHash *Hash
+	WarpFamily string
 
 	// --- Dynamic (guarded by mu) ---
 	mu              sync.RWMutex

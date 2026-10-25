@@ -557,7 +557,31 @@ func TestSingboxBuilder_ParseExtendedProtocols(t *testing.T) {
 }
 
 func TestSingboxBuilder_ParseDomainServerProtocols(t *testing.T) {
-	b := newTestSingboxBuilder(t)
+	packet, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dnsServer := &mDNS.Server{PacketConn: packet, Handler: mDNS.HandlerFunc(func(writer mDNS.ResponseWriter, request *mDNS.Msg) {
+		response := new(mDNS.Msg)
+		response.SetReply(request)
+		for _, question := range request.Question {
+			if question.Qtype == mDNS.TypeA {
+				response.Answer = append(response.Answer, &mDNS.A{
+					Hdr: mDNS.RR_Header{Name: question.Name, Rrtype: mDNS.TypeA, Class: mDNS.ClassINET, Ttl: 60},
+					A:   net.IPv4(127, 0, 0, 1),
+				})
+			}
+		}
+		_ = writer.WriteMsg(response)
+	})}
+	go dnsServer.ActivateAndServe()
+	defer dnsServer.Shutdown()
+	b, err := NewSingboxBuilderWithConfig(SingboxBuilderConfig{
+		DNSUpstreams: []string{"udp://" + packet.LocalAddr().String()},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer b.Close()
 
 	cases := []struct {

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/netip"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,6 +26,11 @@ import (
 // AddNodeFromSub / RemoveNodeFromSub operations.
 type GlobalNodePool struct {
 	nodes *xsync.Map[node.Hash, *node.NodeEntry]
+
+	// Serializes parent subscription mutations with runtime-derived membership.
+	// Never hold this lock while invoking callbacks or notifying platforms.
+	derivedMu       sync.RWMutex
+	derivedByParent map[node.Hash]map[node.Hash]*node.NodeEntry
 
 	// Platform references for dirty-notify.
 	platMu         sync.RWMutex
@@ -87,6 +93,7 @@ func NewGlobalNodePool(cfg PoolConfig) *GlobalNodePool {
 
 	return &GlobalNodePool{
 		nodes:                  xsync.NewMap[node.Hash, *node.NodeEntry](),
+		derivedByParent:        make(map[node.Hash]map[node.Hash]*node.NodeEntry),
 		subLookup:              cfg.SubLookup,
 		geoLookup:              cfg.GeoLookup,
 		onNodeAdded:            cfg.OnNodeAdded,
@@ -109,6 +116,7 @@ func NewGlobalNodePool(cfg PoolConfig) *GlobalNodePool {
 // After mutation, notifies all platforms to re-evaluate the node.
 func (p *GlobalNodePool) AddNodeFromSub(hash node.Hash, rawOpts json.RawMessage, subID string) {
 	isNew := false
+	p.derivedMu.Lock()
 	p.nodes.Compute(hash, func(entry *node.NodeEntry, loaded bool) (*node.NodeEntry, xsync.ComputeOp) {
 		if !loaded {
 			createdAt := time.Now()
@@ -120,6 +128,8 @@ func (p *GlobalNodePool) AddNodeFromSub(hash node.Hash, rawOpts json.RawMessage,
 		entry.AddSubscriptionID(subID)
 		return entry, xsync.UpdateOp
 	})
+	p.refreshDerivedTagsLocked(hash)
+	p.derivedMu.Unlock()
 
 	if isNew && p.onNodeAdded != nil {
 		p.onNodeAdded(hash)
@@ -138,6 +148,8 @@ func (p *GlobalNodePool) AddNodeFromSub(hash node.Hash, rawOpts json.RawMessage,
 func (p *GlobalNodePool) RemoveNodeFromSub(hash node.Hash, subID string) {
 	wasDeleted := false
 	var deletedEntry *node.NodeEntry // capture entry before map deletion
+	var deletedChildren []*node.NodeEntry
+	p.derivedMu.Lock()
 	p.nodes.Compute(hash, func(entry *node.NodeEntry, loaded bool) (*node.NodeEntry, xsync.ComputeOp) {
 		if !loaded {
 			return entry, xsync.CancelOp // idempotent no-op
@@ -150,6 +162,30 @@ func (p *GlobalNodePool) RemoveNodeFromSub(hash node.Hash, subID string) {
 		}
 		return entry, xsync.UpdateOp
 	})
+	for childHash, child := range p.derivedByParent[hash] {
+		if wasDeleted {
+			p.nodes.Delete(childHash)
+			if warp := p.warpSubscription(); warp != nil {
+				warp.ManagedNodes().Delete(childHash)
+			}
+			deletedChildren = append(deletedChildren, child)
+		}
+	}
+	if !wasDeleted {
+		p.refreshDerivedTagsLocked(hash)
+	}
+	if wasDeleted {
+		delete(p.derivedByParent, hash)
+	}
+	p.derivedMu.Unlock()
+
+	// Child outbounds depend on the parent, so close them before its callback.
+	for _, child := range deletedChildren {
+		if p.onNodeRemoved != nil {
+			p.onNodeRemoved(child.Hash, child)
+		}
+		p.notifyAllPlatformsDirty(child.Hash)
+	}
 
 	if p.onSubNodeChanged != nil {
 		p.onSubNodeChanged(subID, hash, false)
@@ -159,6 +195,133 @@ func (p *GlobalNodePool) RemoveNodeFromSub(hash node.Hash, subID string) {
 	}
 
 	p.notifyAllPlatformsDirty(hash)
+}
+
+// AddDerivedNode publishes an already-established runtime WARP outbound.
+// The caller retains ownership when false is returned. Derived nodes belong
+// exclusively to the runtime WARP subscription, while their parent remains
+// responsible for transport reachability and lifecycle.
+func (p *GlobalNodePool) AddDerivedNode(entry *node.NodeEntry, expectedParent ...*node.NodeEntry) bool {
+	if entry == nil || entry.ParentHash == nil || entry.Hash == *entry.ParentHash ||
+		(entry.WarpFamily != "ipv4" && entry.WarpFamily != "ipv6") || !entry.IsHealthy() {
+		return false
+	}
+	p.derivedMu.Lock()
+	warp := p.warpSubscription()
+	parent, ok := p.nodes.Load(*entry.ParentHash)
+	if warp == nil || !warp.Enabled() || !ok || parent.ParentHash != nil || !parent.IsHealthy() ||
+		parent.IsDisabledBySubscriptions(p.MakeSubLookup()) ||
+		(len(expectedParent) > 0 && parent != expectedParent[0]) {
+		p.derivedMu.Unlock()
+		return false
+	}
+	if _, exists := p.nodes.Load(entry.Hash); exists {
+		p.derivedMu.Unlock()
+		return false
+	}
+	entry.AddSubscriptionID(subscription.WarpSubscriptionID)
+	warp.ManagedNodes().StoreNode(entry.Hash, subscription.ManagedNode{Tags: p.derivedTags(entry)})
+	children := p.derivedByParent[parent.Hash]
+	if children == nil {
+		children = make(map[node.Hash]*node.NodeEntry)
+		p.derivedByParent[parent.Hash] = children
+	}
+	children[entry.Hash] = entry
+	p.nodes.Store(entry.Hash, entry)
+	p.derivedMu.Unlock()
+	p.notifyAllPlatformsDirty(entry.Hash)
+	return true
+}
+
+// RemoveDerivedNode removes a runtime WARP node and invokes normal resource
+// cleanup, without emitting subscription persistence callbacks.
+func (p *GlobalNodePool) RemoveDerivedNode(hash node.Hash) bool {
+	p.derivedMu.Lock()
+	entry, ok := p.nodes.Load(hash)
+	if !ok || entry.ParentHash == nil {
+		p.derivedMu.Unlock()
+		return false
+	}
+	p.nodes.Delete(hash)
+	if warp := p.warpSubscription(); warp != nil {
+		warp.ManagedNodes().Delete(hash)
+	}
+	children := p.derivedByParent[*entry.ParentHash]
+	delete(children, hash)
+	if len(children) == 0 {
+		delete(p.derivedByParent, *entry.ParentHash)
+	}
+	p.derivedMu.Unlock()
+	if p.onNodeRemoved != nil {
+		p.onNodeRemoved(hash, entry)
+	}
+	p.notifyAllPlatformsDirty(hash)
+	return true
+}
+
+func (p *GlobalNodePool) warpSubscription() *subscription.Subscription {
+	if p.subLookup == nil {
+		return nil
+	}
+	sub := p.subLookup(subscription.WarpSubscriptionID)
+	if sub == nil || sub.SourceType() != subscription.SourceTypeWarp {
+		return nil
+	}
+	return sub
+}
+
+// derivedTags retains the parent label inside WARP's own namespace. It is
+// resolved dynamically so parent renames and refreshed tags are immediately
+// visible without restoring membership in the original subscription.
+func (p *GlobalNodePool) derivedTags(entry *node.NodeEntry) []string {
+	if entry == nil || entry.ParentHash == nil || p.subLookup == nil {
+		return nil
+	}
+	parent, ok := p.nodes.Load(*entry.ParentHash)
+	if !ok || parent.ParentHash != nil {
+		return nil
+	}
+	var tags []string
+	for _, subID := range parent.SubscriptionIDs() {
+		if subID == subscription.WarpSubscriptionID {
+			continue
+		}
+		sub := p.subLookup(subID)
+		if sub == nil || !sub.Enabled() {
+			continue
+		}
+		managed, exists := sub.ManagedNodes().LoadNode(parent.Hash)
+		if !exists || managed.Evicted {
+			continue
+		}
+		for _, tag := range managed.Tags {
+			tags = append(tags, sub.Name()+"/"+tag+"/WARP-"+entry.WarpFamily)
+		}
+	}
+	slices.Sort(tags)
+	return slices.Compact(tags)
+}
+
+// Called under derivedMu so a parent removal cannot race a managed-node insert.
+func (p *GlobalNodePool) refreshDerivedTagsLocked(parent node.Hash) {
+	warp := p.warpSubscription()
+	if warp == nil {
+		return
+	}
+	for hash, child := range p.derivedByParent[parent] {
+		warp.ManagedNodes().StoreNode(hash, subscription.ManagedNode{Tags: p.derivedTags(child)})
+	}
+}
+
+func (p *GlobalNodePool) derivedHashes(parent node.Hash) []node.Hash {
+	p.derivedMu.RLock()
+	defer p.derivedMu.RUnlock()
+	children := p.derivedByParent[parent]
+	hashes := make([]node.Hash, 0, len(children))
+	for hash := range children {
+		hashes = append(hashes, hash)
+	}
+	return hashes
 }
 
 // GetEntry retrieves a node entry by hash.
@@ -296,6 +459,22 @@ func (p *GlobalNodePool) platformSnapshot() []*platform.Platform {
 // MakeSubLookup builds the SubLookupFunc closure for MatchRegexs / tag resolution.
 func (p *GlobalNodePool) MakeSubLookup() node.SubLookupFunc {
 	return func(subID string, hash node.Hash) (string, bool, []string, bool) {
+		if entry, exists := p.nodes.Load(hash); exists && entry.ParentHash != nil {
+			if subID != subscription.WarpSubscriptionID {
+				return "", false, nil, false
+			}
+			warp := p.warpSubscription()
+			if warp == nil {
+				return "", false, nil, false
+			}
+			managed, managedExists := warp.ManagedNodes().LoadNode(hash)
+			parent, exists := p.nodes.Load(*entry.ParentHash)
+			if !managedExists || managed.Evicted || !exists || !parent.IsHealthy() ||
+				parent.ParentHash != nil || parent.IsDisabledBySubscriptions(p.MakeSubLookup()) {
+				return "", false, nil, false
+			}
+			return warp.Name(), warp.Enabled(), p.derivedTags(entry), true
+		}
 		// Compatibility fallback for test wiring that omits SubLookup.
 		// We cannot resolve subscription metadata, so treat the reference as
 		// "present+enabled" without tags.
@@ -333,6 +512,13 @@ func (p *GlobalNodePool) ResolveNodeDisplayTag(hash node.Hash) string {
 	entry, ok := p.GetEntry(hash)
 	if !ok || entry == nil {
 		return ""
+	}
+	if entry.ParentHash != nil {
+		tags := p.derivedTags(entry)
+		if len(tags) == 0 {
+			return ""
+		}
+		return subscription.WarpSubscriptionName + "/" + tags[0]
 	}
 	subIDs := entry.SubscriptionIDs()
 	if len(subIDs) == 0 {
@@ -439,6 +625,13 @@ func (p *GlobalNodePool) platformExcluder(platformID string, now time.Time) plat
 
 // notifyAllPlatformsDirty tells every registered platform to re-evaluate a node.
 func (p *GlobalNodePool) notifyAllPlatformsDirty(hash node.Hash) {
+	// A parent's health, subscription and tag changes also affect its children.
+	children := p.derivedHashes(hash)
+	defer func() {
+		for _, child := range children {
+			p.notifyAllPlatformsDirty(child)
+		}
+	}()
 	platforms := p.platformSnapshot()
 	if len(platforms) == 0 {
 		return
@@ -579,7 +772,7 @@ func (p *GlobalNodePool) RecordResult(hash node.Hash, success bool) {
 	if circuitStateChanged {
 		p.notifyAllPlatformsDirty(hash)
 	}
-	if dynamicChanged && p.onNodeDynamicChanged != nil {
+	if dynamicChanged && entry.ParentHash == nil && p.onNodeDynamicChanged != nil {
 		p.onNodeDynamicChanged(hash)
 	}
 }
@@ -687,7 +880,7 @@ func (p *GlobalNodePool) RecordLatency(hash node.Hash, rawTarget string, latency
 	if isAuthority {
 		entry.LastAuthorityLatencyProbeAttempt.Store(nowNs)
 	}
-	if p.onNodeDynamicChanged != nil {
+	if entry.ParentHash == nil && p.onNodeDynamicChanged != nil {
 		p.onNodeDynamicChanged(hash)
 	}
 
@@ -711,7 +904,7 @@ func (p *GlobalNodePool) RecordLatency(hash node.Hash, rawTarget string, latency
 		p.notifyAllPlatformsDirty(hash)
 	}
 
-	if p.onNodeLatencyChanged != nil {
+	if entry.ParentHash == nil && p.onNodeLatencyChanged != nil {
 		p.onNodeLatencyChanged(hash, domain)
 		if evicted {
 			p.onNodeLatencyChanged(hash, evictedDomain)
@@ -767,7 +960,7 @@ func (p *GlobalNodePool) UpdateNodeEgressIP(hash node.Hash, ip *netip.Addr, loc 
 	if ipChanged || regionChanged {
 		p.notifyAllPlatformsDirty(hash)
 	}
-	if p.onNodeDynamicChanged != nil {
+	if entry.ParentHash == nil && p.onNodeDynamicChanged != nil {
 		p.onNodeDynamicChanged(hash)
 	}
 }

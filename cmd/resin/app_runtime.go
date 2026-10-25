@@ -372,6 +372,10 @@ func (a *resinApp) startBackgroundServices() {
 	a.topoRuntime.scheduler.Start()
 	a.topoRuntime.scheduler.ForceRefreshAllAsync()
 	log.Println("Subscription scheduler started; forced full refresh running in background (batch 3)")
+	if a.topoRuntime.warpMgr != nil {
+		a.topoRuntime.warpMgr.Start()
+		log.Println("WARP exit manager started")
+	}
 }
 
 func (a *resinApp) buildNetworkServers(engine *state.StateEngine) error {
@@ -616,6 +620,10 @@ func (a *resinApp) shutdown(ctx context.Context) {
 
 	a.topoRuntime.scheduler.Stop()
 	log.Println("Subscription scheduler stopped")
+	if a.topoRuntime.warpMgr != nil {
+		a.topoRuntime.warpMgr.Stop()
+		log.Println("WARP exit manager stopped")
+	}
 
 	a.topoRuntime.probeMgr.Stop()
 	log.Println("Probe manager stopped")

@@ -33,6 +33,7 @@ var supportedOutboundTypes = map[string]bool{
 	"tor":         true,
 	"ssh":         true,
 	"naive":       true,
+	"mieru":       true,
 }
 
 // ParsedNode represents a single parsed outbound from a subscription response.
@@ -202,6 +203,28 @@ func parseClashProxiesJSON(raw json.RawMessage) ([]ParsedNode, error) {
 
 func parseClashYAMLSubscription(text string) ([]ParsedNode, bool, error) {
 	if !looksLikeClashYAML(text) {
+		// A copied Clash/Mihomo node list may omit the outer "proxies:" key.
+		// Recognize only mapping entries with a protocol and server, leaving
+		// unrelated YAML or URI-line inputs to the other parsers.
+		if first := firstYAMLContentLine(text); strings.HasPrefix(first, "- ") || first == "-" {
+			var proxies []map[string]any
+			err := yaml.Unmarshal([]byte(text), &proxies)
+			if err != nil {
+				// Input trimming can remove only the first line's root indent
+				// from an otherwise uniformly indented copied node list.
+				if restored := restoreBareYAMLRootIndent(text); restored != text {
+					proxies = nil
+					err = yaml.Unmarshal([]byte(restored), &proxies)
+				}
+			}
+			if err == nil {
+				for _, proxy := range proxies {
+					if getString(proxy, "type") != "" && getString(proxy, "server") != "" {
+						return parseClashProxies(proxies), true, nil
+					}
+				}
+			}
+		}
 		return nil, false, nil
 	}
 
@@ -221,6 +244,49 @@ func parseClashYAMLSubscription(text string) ([]ParsedNode, bool, error) {
 		proxies = cfg.ProxyLower
 	}
 	return parseClashProxies(proxies), true, nil
+}
+
+// restoreBareYAMLRootIndent repairs only a bare sequence whose first line lost
+// its indentation. Restore that line instead of trimming continuation lines,
+// so nested YAML values retain their original relative indentation.
+func restoreBareYAMLRootIndent(text string) string {
+	lines := strings.Split(text, "\n")
+	if len(lines) < 2 || !(strings.HasPrefix(lines[0], "- ") || strings.TrimSpace(lines[0]) == "-") {
+		return text
+	}
+	indent := -1
+	sequenceAtMinimum := false
+	for _, line := range lines[1:] {
+		content := strings.TrimSpace(line)
+		if content == "" || content == "..." || strings.HasPrefix(content, "#") {
+			continue
+		}
+		spaces := len(line) - len(strings.TrimLeft(line, " "))
+		isSequence := strings.HasPrefix(content, "- ") || content == "-"
+		if indent < 0 || spaces < indent {
+			indent, sequenceAtMinimum = spaces, isSequence
+		} else if spaces == indent && isSequence {
+			sequenceAtMinimum = true
+		}
+	}
+	if !sequenceAtMinimum && !strings.HasPrefix(strings.TrimSpace(strings.TrimPrefix(lines[0], "-")), "{") {
+		// A single block-style item has mapping keys two columns after '- '.
+		indent -= 2
+	}
+	if indent <= 0 {
+		return text
+	}
+	return strings.Repeat(" ", indent) + text
+}
+
+func firstYAMLContentLine(text string) string {
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" && line != "---" && !strings.HasPrefix(line, "#") {
+			return line
+		}
+	}
+	return ""
 }
 
 func parseClashProxies(proxies []map[string]any) []ParsedNode {
@@ -1180,6 +1246,61 @@ func convertClashProxyToNode(proxy map[string]any) (ParsedNode, bool) {
 	}
 
 	switch nodeType {
+	case "mieru":
+		// Unlike the outer transport, Mieru's multiplexing and handshake
+		// modes are protocol settings and must survive subscription conversion.
+		for _, key := range []string{"transport", "handshake-mode", "handshake_mode", "multiplexing"} {
+			if value, exists := proxy[key]; exists {
+				text, ok := value.(string)
+				if !ok || strings.TrimSpace(text) == "" {
+					return ParsedNode{}, false
+				}
+			}
+		}
+		port, err := strconv.ParseUint(strings.TrimSpace(getString(proxy, "port")), 10, 16)
+		username := getString(proxy, "username")
+		password := getString(proxy, "password")
+		if err != nil || port == 0 || strings.TrimSpace(username) == "" || password == "" {
+			return ParsedNode{}, false
+		}
+		transport := strings.ToLower(strings.TrimSpace(getString(proxy, "transport")))
+		if transport == "" {
+			transport = "tcp"
+		}
+		if transport != "tcp" && transport != "udp" {
+			return ParsedNode{}, false
+		}
+		handshake := strings.ToUpper(strings.TrimSpace(getString(proxy, "handshake-mode", "handshake_mode")))
+		if handshake == "" {
+			handshake = "HANDSHAKE_STANDARD"
+		}
+		switch handshake {
+		case "HANDSHAKE_DEFAULT", "HANDSHAKE_STANDARD", "HANDSHAKE_NO_WAIT":
+		default:
+			return ParsedNode{}, false
+		}
+		multiplexing := strings.ToUpper(strings.TrimSpace(getString(proxy, "multiplexing")))
+		if multiplexing == "" {
+			multiplexing = "MULTIPLEXING_LOW"
+		}
+		switch multiplexing {
+		case "MULTIPLEXING_DEFAULT", "MULTIPLEXING_OFF", "MULTIPLEXING_LOW", "MULTIPLEXING_MIDDLE", "MULTIPLEXING_HIGH":
+		default:
+			return ParsedNode{}, false
+		}
+		outbound := map[string]any{
+			"type":           "mieru",
+			"tag":            defaultTag(tag, "mieru", server, port),
+			"server":         server,
+			"server_port":    port,
+			"transport":      transport,
+			"username":       username,
+			"password":       password,
+			"handshake_mode": handshake,
+			"multiplexing":   multiplexing,
+		}
+		applyClashDialFields(outbound, proxy)
+		return buildParsedNode(outbound)
 	case "ss", "shadowsocks":
 		method := normalizeShadowsocksMethod(firstNonEmpty(getString(proxy, "cipher"), getString(proxy, "method")))
 		password := strings.TrimSpace(getString(proxy, "password"))

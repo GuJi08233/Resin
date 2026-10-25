@@ -21,6 +21,9 @@ func TestNewDefaultRuntimeConfig(t *testing.T) {
 	if len(cfg.LatencyAuthorities) != 4 {
 		t.Errorf("LatencyAuthorities: got %d items, want 4", len(cfg.LatencyAuthorities))
 	}
+	if cfg.WarpEnabled || cfg.WarpStack != "dual" || cfg.WarpExitsPerFamily != 1 || cfg.WarpMaxNodes != 300 || cfg.WarpReconnectAttempts != 3 {
+		t.Errorf("unexpected WARP defaults: %+v", cfg)
+	}
 }
 
 func TestRuntimeConfig_JSONRoundTrip(t *testing.T) {
@@ -101,6 +104,11 @@ func TestRuntimeConfig_JSONFieldNames(t *testing.T) {
 		"max_egress_test_interval",
 		"latency_test_url",
 		"latency_authorities",
+		"warp_enabled",
+		"warp_stack",
+		"warp_exits_per_family",
+		"warp_max_nodes",
+		"warp_reconnect_attempts",
 		"p2c_latency_window",
 		"latency_decay_window",
 		"cache_flush_interval",

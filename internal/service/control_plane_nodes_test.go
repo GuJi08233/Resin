@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/json"
 	"net/netip"
 	"sync/atomic"
 	"testing"
@@ -15,6 +16,146 @@ import (
 	"github.com/Resinat/Resin/internal/testutil"
 	"github.com/Resinat/Resin/internal/topology"
 )
+
+func addDerivedNodeForList(t *testing.T, pool *topology.GlobalNodePool, parentHash node.Hash, family string) node.Hash {
+	t.Helper()
+	raw, err := json.Marshal(map[string]string{"type": "resin-warp", "parent_hash": parentHash.Hex(), "family": family})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := node.NewNodeEntry(node.HashFromRawOptions(raw), raw, time.Now(), 16)
+	child.ParentHash = &parentHash
+	child.WarpFamily = family
+	outbound := testutil.NewNoopOutbound()
+	child.Outbound.Store(&outbound)
+	child.SetEgressIP(netip.MustParseAddr("198.51.100.99"))
+	if family == "ipv6" {
+		child.SetEgressIP(netip.MustParseAddr("2001:db8::99"))
+	}
+	child.LatencyTable.Update("cloudflare.com", 20*time.Millisecond, time.Minute)
+	t.Cleanup(child.LatencyTable.Close)
+	if !pool.AddDerivedNode(child) {
+		t.Fatal("could not publish derived test node")
+	}
+	return child.Hash
+}
+
+func TestListNodes_WarpHasIndependentSubscriptionAndSearchesParentTags(t *testing.T) {
+	subMgr := topology.NewSubscriptionManager()
+	warp := subscription.NewWarpSubscription(true)
+	subMgr.Register(warp)
+	pool := newNodeListTestPool(subMgr)
+	plat := platform.NewPlatform("plat-warp", "plat", nil, nil)
+	pool.RegisterPlatform(plat)
+	sub := subscription.NewSubscription("sub-warp", "Airport", "", true, false)
+	subMgr.Register(sub)
+	parent := addRoutableNodeForSubscriptionWithTag(t, pool, sub,
+		[]byte(`{"type":"socks","server":"192.0.2.1","server_port":1080}`), "203.0.113.1", "US-fast")
+	ipv4 := addDerivedNodeForList(t, pool, parent, "ipv4")
+	ipv6 := addDerivedNodeForList(t, pool, parent, "ipv6")
+	cp := &ControlPlaneService{Pool: pool, SubMgr: subMgr}
+	for _, filters := range []NodeFilters{
+		{SubscriptionID: &sub.ID},
+		{SubscriptionID: &sub.ID, PlatformID: &plat.ID},
+	} {
+		listed, err := cp.ListNodes(filters)
+		if err != nil || len(listed) != 1 || listed[0].NodeHash != parent.Hex() {
+			t.Fatalf("original subscription exposed derived nodes: %+v, %v", listed, err)
+		}
+	}
+	for _, filters := range []NodeFilters{
+		{SubscriptionID: &warp.ID},
+		{SubscriptionID: &warp.ID, PlatformID: &plat.ID},
+	} {
+		listed, err := cp.ListNodes(filters)
+		if err != nil || len(listed) != 2 {
+			t.Fatalf("WARP subscription/platform filtering lost derived nodes: %+v, %v", listed, err)
+		}
+		seen := map[string]bool{}
+		for _, item := range listed {
+			seen[item.NodeHash] = true
+		}
+		if seen[parent.Hex()] || !seen[ipv4.Hex()] || !seen[ipv6.Hex()] {
+			t.Fatalf("WARP subscription did not contain exclusively derived nodes: %+v", listed)
+		}
+	}
+	for _, keyword := range []string{"AIRPORT/us-FAST", "wArP-IPV6"} {
+		listed, err := cp.ListNodes(NodeFilters{SubscriptionID: &warp.ID, TagKeyword: &keyword})
+		want := 2
+		if keyword == "wArP-IPV6" {
+			want = 1
+		}
+		if err != nil || len(listed) != want {
+			t.Fatalf("search %q: got %+v, %v", keyword, listed, err)
+		}
+		if want == 1 && listed[0].NodeHash != ipv6.Hex() {
+			t.Fatalf("WARP family search matched wrong node: %+v", listed)
+		}
+	}
+
+	managed, _ := sub.ManagedNodes().LoadNode(parent)
+	managed.Evicted = true
+	sub.ManagedNodes().StoreNode(parent, managed)
+	listed, err := cp.ListNodes(NodeFilters{SubscriptionID: &sub.ID})
+	if err != nil || len(listed) != 0 {
+		t.Fatalf("evicted parent still exposes derived subscription members: %+v, %v", listed, err)
+	}
+	keyword := "Airport"
+	listed, err = cp.ListNodes(NodeFilters{TagKeyword: &keyword})
+	if err != nil || len(listed) != 0 {
+		t.Fatalf("evicted tags still searchable: %+v, %v", listed, err)
+	}
+}
+
+func TestGetNode_WarpSummaryInheritsCurrentTagsAndExposesParent(t *testing.T) {
+	subMgr := topology.NewSubscriptionManager()
+	subMgr.Register(subscription.NewWarpSubscription(true))
+	pool := newNodeListTestPool(subMgr)
+	sub := subscription.NewSubscription("sub-warp", "Airport", "", true, false)
+	subMgr.Register(sub)
+	parent := addRoutableNodeForSubscriptionWithTag(t, pool, sub,
+		[]byte(`{"type":"socks","server":"192.0.2.1","server_port":1080}`), "203.0.113.1", "US-fast")
+	child := addDerivedNodeForList(t, pool, parent, "ipv6")
+	cp := &ControlPlaneService{Pool: pool, SubMgr: subMgr}
+	for _, tag := range []string{"US-fast", "EU-updated"} {
+		sub.ManagedNodes().StoreNode(parent, subscription.ManagedNode{Tags: []string{tag}})
+		summary, err := cp.GetNode(child.Hex())
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantTag := "WARP/Airport/" + tag + "/WARP-ipv6"
+		if summary.ParentHash != parent.Hex() || summary.WarpFamily != "ipv6" || summary.DisplayTag != wantTag {
+			t.Fatalf("incorrect WARP metadata/display: %+v", summary)
+		}
+		if len(summary.Tags) != 1 || summary.Tags[0].Tag != wantTag || summary.Tags[0].SubscriptionID != subscription.WarpSubscriptionID {
+			t.Fatalf("derived node did not inherit updated parent tags: %+v", summary.Tags)
+		}
+		encoded, err := json.Marshal(summary)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]any
+		if err := json.Unmarshal(encoded, &fields); err != nil {
+			t.Fatal(err)
+		}
+		if fields["parent_hash"] != parent.Hex() || fields["warp_family"] != "ipv6" {
+			t.Fatalf("missing API metadata: %s", encoded)
+		}
+	}
+	original, err := cp.GetNode(parent.Hex())
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := json.Marshal(original)
+	var fields map[string]any
+	_ = json.Unmarshal(encoded, &fields)
+	if _, exists := fields["parent_hash"]; exists {
+		t.Fatalf("original node exposed parent metadata: %s", encoded)
+	}
+	if _, exists := fields["warp_family"]; exists {
+		t.Fatalf("original node exposed WARP metadata: %s", encoded)
+	}
+}
 
 func newNodeListTestPool(subMgr *topology.SubscriptionManager) *topology.GlobalNodePool {
 	return topology.NewGlobalNodePool(topology.PoolConfig{

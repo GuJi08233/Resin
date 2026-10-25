@@ -5,16 +5,20 @@ go 1.25.5
 require (
 	github.com/anytls/sing-anytls v0.0.13
 	github.com/ccojocar/zxcvbn-go v1.0.4
+	github.com/enfein/mieru/v3 v3.39.0
 	github.com/golang-migrate/migrate/v4 v4.19.1
 	github.com/google/uuid v1.6.0
 	github.com/joho/godotenv v1.5.1
+	github.com/miekg/dns v1.1.67
 	github.com/oschwald/maxminddb-golang v1.13.1
 	github.com/puzpuzpuz/xsync/v4 v4.4.0
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/sagernet/sing v0.7.18
 	github.com/sagernet/sing-box v1.12.21
+	github.com/sagernet/wireguard-go v0.0.1-beta.7
 	github.com/zeebo/xxh3 v1.0.2
 	golang.org/x/net v0.50.0
+	google.golang.org/protobuf v1.36.7
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.45.0
 )
@@ -73,7 +77,6 @@ require (
 	github.com/metacubex/tfo-go v0.0.0-20250921095601-b102db4216c0 // indirect
 	github.com/metacubex/utls v1.8.4 // indirect
 	github.com/mholt/acmez/v3 v3.1.2 // indirect
-	github.com/miekg/dns v1.1.67 // indirect
 	github.com/mitchellh/go-ps v1.0.0 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/pierrec/lz4/v4 v4.1.21 // indirect
@@ -97,7 +100,6 @@ require (
 	github.com/sagernet/sing-vmess v0.2.7 // indirect
 	github.com/sagernet/smux v1.5.50-sing-box-mod.1 // indirect
 	github.com/sagernet/tailscale v1.80.3-sing-box-1.12-mod.2 // indirect
-	github.com/sagernet/wireguard-go v0.0.1-beta.7 // indirect
 	github.com/sagernet/ws v0.0.0-20231204124109-acfe8907c854 // indirect
 	github.com/tailscale/certstore v0.1.1-0.20231202035212-d3fa0460f47e // indirect
 	github.com/tailscale/go-winio v0.0.0-20231025203758-c4f33415bf55 // indirect
@@ -129,7 +131,6 @@ require (
 	golang.zx2c4.com/wireguard/windows v0.5.3 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250818200422-3122310a409c // indirect
 	google.golang.org/grpc v1.74.2 // indirect
-	google.golang.org/protobuf v1.36.7 // indirect
 	lukechampine.com/blake3 v1.3.0 // indirect
 	modernc.org/libc v1.67.6 // indirect
 	modernc.org/mathutil v1.7.1 // indirect

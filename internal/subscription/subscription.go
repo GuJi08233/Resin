@@ -369,6 +369,8 @@ func DiffHashes(
 
 func normalizeSourceType(sourceType string) string {
 	switch sourceType {
+	case SourceTypeWarp:
+		return SourceTypeWarp
 	case SourceTypeLocal:
 		return SourceTypeLocal
 	default:

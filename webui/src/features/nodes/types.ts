@@ -6,6 +6,8 @@ export type NodeTag = {
 
 export type NodeSummary = {
   node_hash: string;
+  parent_hash?: string;
+  warp_family?: "ipv4" | "ipv6";
   created_at: string;
   enabled: boolean;
   display_tag?: string;

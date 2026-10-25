@@ -29,6 +29,7 @@ import (
 	"github.com/Resinat/Resin/internal/state"
 	"github.com/Resinat/Resin/internal/subscription"
 	"github.com/Resinat/Resin/internal/topology"
+	"github.com/Resinat/Resin/internal/warppool"
 )
 
 type topologyRuntime struct {
@@ -42,6 +43,7 @@ type topologyRuntime struct {
 	leaseCleaner     *routing.LeaseCleaner
 	outboundMgr      *outbound.OutboundManager
 	singboxBuilder   *outbound.SingboxBuilder // for Close on shutdown
+	warpMgr          *warppool.Manager
 }
 
 const downloadUserAgent = "clash.meta"
@@ -210,6 +212,7 @@ func newTopologyRuntime(
 	onNodeRemoved func(node.Hash),
 ) (*topologyRuntime, error) {
 	subManager := topology.NewSubscriptionManager()
+	subManager.Register(subscription.NewWarpSubscription(runtimeConfigSnapshot(runtimeCfg).WarpEnabled))
 
 	pool := topology.NewGlobalNodePool(topology.PoolConfig{
 		SubLookup: subManager.Lookup,
@@ -318,7 +321,9 @@ func newTopologyRuntime(
 		probeMgr.TriggerImmediateEgressProbe(hash)
 	})
 	pool.SetOnNodeRemoved(func(hash node.Hash, entry *node.NodeEntry) {
-		markNodeRemovedDirty(engine, hash, entry)
+		if entry == nil || entry.ParentHash == nil {
+			markNodeRemovedDirty(engine, hash, entry)
+		}
 		outboundMgr.RemoveNodeOutbound(entry)
 		if entry != nil && entry.LatencyTable != nil {
 			entry.LatencyTable.Close()
@@ -328,6 +333,14 @@ func newTopologyRuntime(
 		}
 	})
 	log.Println("ProbeManager initialized")
+	warpMgr := warppool.NewManager(warppool.Options{
+		Pool:          pool,
+		Subscriptions: subManager,
+		Settings: func() *config.RuntimeConfig {
+			return runtimeConfigSnapshot(runtimeCfg)
+		},
+		MaxLatencyEntries: envCfg.MaxLatencyTableEntries,
+	})
 
 	scheduler := topology.NewSubscriptionScheduler(topology.SchedulerConfig{
 		SubManager: subManager,
@@ -356,6 +369,7 @@ func newTopologyRuntime(
 		ephemeralCleaner: ephemeralCleaner,
 		outboundMgr:      outboundMgr,
 		singboxBuilder:   singboxBuilder,
+		warpMgr:          warpMgr,
 	}, nil
 }
 
@@ -384,6 +398,9 @@ func bootstrapTopology(
 		return fmt.Errorf("load subscriptions: %w", err)
 	}
 	for _, ms := range dbSubs {
+		if ms.ID == subscription.WarpSubscriptionID {
+			continue
+		}
 		sub := subscription.NewSubscription(ms.ID, ms.Name, ms.URL, ms.Enabled, ms.Ephemeral)
 		sub.SetFetchConfig(ms.URL, ms.UpdateIntervalNs)
 		sub.SetSourceType(ms.SourceType)
@@ -502,7 +519,7 @@ func newFlushReaders(
 				return nil
 			}
 			entry, ok := pool.GetEntry(h)
-			if !ok {
+			if !ok || entry.ParentHash != nil {
 				return nil
 			}
 			return &model.NodeStatic{
@@ -517,7 +534,7 @@ func newFlushReaders(
 				return nil
 			}
 			entry, ok := pool.GetEntry(h)
-			if !ok {
+			if !ok || entry.ParentHash != nil {
 				return nil
 			}
 			egressIP := entry.GetEgressIP()
@@ -543,7 +560,7 @@ func newFlushReaders(
 				return nil
 			}
 			entry, ok := pool.GetEntry(h)
-			if !ok || entry.LatencyTable == nil {
+			if !ok || entry.ParentHash != nil || entry.LatencyTable == nil {
 				return nil
 			}
 			stats, ok := entry.LatencyTable.GetDomainStats(key.Domain)

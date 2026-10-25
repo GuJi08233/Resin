@@ -140,17 +140,12 @@ func (s *ControlPlaneService) nodeEntryMatchesFilters(
 		if keyword != "" {
 			matched := false
 			for _, subID := range entry.SubscriptionIDs() {
-				sub := s.SubMgr.Lookup(subID)
-				if sub == nil {
-					continue
-				}
-				managed, ok := sub.ManagedNodes().LoadNode(entry.Hash)
+				name, tags, ok := s.nodeSubscriptionTags(entry, subID)
 				if !ok {
 					continue
 				}
-				tags := managed.Tags
 				for _, tag := range tags {
-					displayTag := sub.Name() + "/" + tag
+					displayTag := name + "/" + tag
 					if strings.Contains(strings.ToLower(displayTag), keyword) {
 						matched = true
 						break
@@ -203,6 +198,19 @@ func (s *ControlPlaneService) nodeEntryMatchesFilters(
 		}
 	}
 	return true
+}
+
+func (s *ControlPlaneService) nodeSubscriptionTags(entry *node.NodeEntry, subID string) (string, []string, bool) {
+	if s.Pool != nil {
+		name, _, tags, ok := s.Pool.MakeSubLookup()(subID, entry.Hash)
+		return name, tags, ok
+	}
+	sub := s.SubMgr.Lookup(subID)
+	if sub == nil {
+		return "", nil, false
+	}
+	managed, ok := sub.ManagedNodes().LoadNode(entry.Hash)
+	return sub.Name(), managed.Tags, ok && !managed.Evicted
 }
 
 // GetNode returns a single node by hash.

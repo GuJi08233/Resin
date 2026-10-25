@@ -71,9 +71,17 @@ const subscriptionCreateSchema = z.object({
 });
 
 const subscriptionEditSchema = subscriptionCreateSchema;
+const warpEditSchema = z.object({
+  enabled: z.boolean(),
+  max_nodes: z.string().refine((value) => {
+    const number = Number(value);
+    return value.trim() !== "" && Number.isInteger(number) && number >= 1 && number <= 1024;
+  }, "WARP 出口上限必须是 1 到 1024 之间的整数"),
+});
 
 type SubscriptionCreateForm = z.infer<typeof subscriptionCreateSchema>;
 type SubscriptionEditForm = z.infer<typeof subscriptionEditSchema>;
+type WarpEditForm = z.infer<typeof warpEditSchema>;
 const EMPTY_SUBSCRIPTIONS: Subscription[] = [];
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100] as const;
 const LOCAL_SOURCE_UPDATE_INTERVAL = "12h";
@@ -92,7 +100,7 @@ function extractHostname(url: string): string {
 function subscriptionToEditForm(subscription: Subscription): SubscriptionEditForm {
   return {
     name: subscription.name,
-    source_type: subscription.source_type,
+    source_type: subscription.source_type === "remote" ? "remote" : "local",
     url: subscription.url,
     content: subscription.content ?? "",
     update_interval: subscription.update_interval,
@@ -105,6 +113,10 @@ function subscriptionToEditForm(subscription: Subscription): SubscriptionEditFor
 
 function sourceTypeLabel(sourceType: SubscriptionSourceType): string {
   return sourceType === "local" ? "本地" : "远程";
+}
+
+function isWarpSubscription(subscription: Subscription): boolean {
+  return subscription.source_type === "warp" || subscription.id === "system-warp";
 }
 
 function parseEnabledFilter(value: EnabledFilter): boolean | undefined {
@@ -216,13 +228,21 @@ export function SubscriptionPage() {
 
   const editEphemeral = editForm.watch("ephemeral");
   const editSourceType = editForm.watch("source_type");
+  const warpEditForm = useForm<WarpEditForm>({
+    resolver: zodResolver(warpEditSchema),
+    defaultValues: { enabled: false, max_nodes: "300" },
+  });
 
   useEffect(() => {
     if (!selectedSubscription) {
       return;
     }
-    editForm.reset(subscriptionToEditForm(selectedSubscription));
-  }, [selectedSubscription, editForm]);
+    if (isWarpSubscription(selectedSubscription)) {
+      warpEditForm.reset({ enabled: selectedSubscription.enabled, max_nodes: String(selectedSubscription.max_nodes ?? 300) });
+    } else {
+      editForm.reset(subscriptionToEditForm(selectedSubscription));
+    }
+  }, [selectedSubscription, editForm, warpEditForm]);
 
   useEffect(() => {
     if (!drawerVisible) {
@@ -320,6 +340,21 @@ export function SubscriptionPage() {
       showToast("error", formatApiErrorMessage(error, t));
     },
   });
+
+  const warpUpdateMutation = useMutation({
+    mutationFn: async (values: WarpEditForm) => {
+      if (!selectedSubscription || !isWarpSubscription(selectedSubscription)) {
+        throw new Error("请选择要编辑的订阅");
+      }
+      return updateSubscription(selectedSubscription.id, { enabled: values.enabled, max_nodes: Number(values.max_nodes) });
+    },
+    onSuccess: async () => {
+      await invalidateSubscriptionsAndNodes();
+      await queryClient.invalidateQueries({ queryKey: ["system-config"] });
+      showToast("success", t("WARP 订阅配置已保存，出口数量将在后台自动调整。"));
+    },
+    onError: (error) => showToast("error", formatApiErrorMessage(error, t)),
+  });
   const deleteSubscriptionMutateAsync = deleteMutation.mutateAsync;
   const isDeletePending = deleteMutation.isPending;
 
@@ -343,6 +378,9 @@ export function SubscriptionPage() {
       updateSubscription(subscription.id, { enabled }),
     onSuccess: async (updated, { enabled }) => {
       await invalidateSubscriptionsAndNodes();
+      if (isWarpSubscription(updated)) {
+        await queryClient.invalidateQueries({ queryKey: ["system-config"] });
+      }
       showToast(
         "success",
         enabled
@@ -512,6 +550,9 @@ export function SubscriptionPage() {
         header: t("订阅源"),
         cell: (info) => {
           const s = info.row.original;
+          if (isWarpSubscription(s)) {
+            return <Badge variant="muted">{t("系统自动管理")}</Badge>;
+          }
           if (s.source_type === "local") {
             return (
               <p className="subscriptions-url-cell" title={t("本地订阅")}>
@@ -528,14 +569,17 @@ export function SubscriptionPage() {
       }),
       col.accessor("update_interval", {
         header: t("更新间隔"),
-        cell: (info) => formatGoDuration(info.getValue()),
+        cell: (info) => isWarpSubscription(info.row.original) ? t("自动维护") : formatGoDuration(info.getValue()),
       }),
       col.display({
         id: "node_count",
         header: t("节点数"),
         cell: (info) => {
           const s = info.row.original;
-          return `${s.healthy_node_count} / ${s.node_count}`;
+          return <div>
+            <span>{`${s.healthy_node_count} / ${s.node_count}`}</span>
+            {isWarpSubscription(s) ? <p className="muted">{t("上限 {{count}}", { count: s.max_nodes ?? 300 })}</p> : null}
+          </div>;
         },
       }),
       col.display({
@@ -543,6 +587,9 @@ export function SubscriptionPage() {
         header: t("刷新状态"),
         cell: (info) => {
           const s = info.row.original;
+          if (isWarpSubscription(s)) {
+            return <Badge variant={s.enabled ? "success" : "muted"}>{s.enabled ? t("自动维护") : t("已禁用")}</Badge>;
+          }
           return (
             <div className="subscriptions-status-cell">
               {s.last_error ? (
@@ -603,7 +650,7 @@ export function SubscriptionPage() {
               <Button size="sm" variant="ghost" onClick={() => openDrawer(s)} title={t("编辑")}>
                 <Pencil size={14} />
               </Button>
-              <Button
+              {!isWarpSubscription(s) ? <><Button
                 size="sm"
                 variant="ghost"
                 onClick={() => void handleRefresh(s)}
@@ -621,7 +668,7 @@ export function SubscriptionPage() {
                 style={{ color: "var(--delete-btn-color, #c27070)" }}
               >
                 <Trash2 size={14} />
-              </Button>
+              </Button></> : null}
             </div>
           );
         },
@@ -776,7 +823,9 @@ export function SubscriptionPage() {
                 <div className="platform-drawer-section-head">
                   <h4>{t("订阅配置")}</h4>
                   <p>
-                    {editSourceType === "local"
+                    {isWarpSubscription(selectedSubscription)
+                      ? t("统一管理所有 WARP 派生出口。保存上限后自动扩容或缩容，禁用后关闭这些出口。")
+                      : editSourceType === "local"
                       ? t("更新本地订阅配置、刷新周期与状态开关后点击保存。")
                       : t("更新 URL、刷新周期与状态开关后点击保存。")}
                   </p>
@@ -799,11 +848,30 @@ export function SubscriptionPage() {
 
                 {selectedSubscription.last_error ? (
                   <div className="callout callout-error">{t("最近错误：{{message}}", { message: selectedSubscription.last_error })}</div>
-                ) : (
+                ) : !isWarpSubscription(selectedSubscription) ? (
                   <div className="callout callout-success">{t("最近一次刷新无错误")}</div>
-                )}
+                ) : null}
 
-                <form className="form-grid" onSubmit={onEditSubmit}>
+                {isWarpSubscription(selectedSubscription) ? (
+                  <form className="form-grid" onSubmit={warpEditForm.handleSubmit(async (values) => { await warpUpdateMutation.mutateAsync(values); })}>
+                    <div className="subscription-switch-item field-span-2">
+                      <label className="subscription-switch-label" htmlFor="edit-warp-enabled">{t("启用 WARP 订阅")}</label>
+                      <Switch id="edit-warp-enabled" {...warpEditForm.register("enabled")} />
+                    </div>
+                    <p className="muted field-span-2">{t("启用后自动通过现有支持 UDP 的节点建立 WARP 隧道；关闭后释放 WARP 隧道，原始节点继续可用。")}</p>
+                    <div className="field-group field-span-2">
+                      <label className="field-label" htmlFor="edit-warp-max-nodes">{t("WARP 出口总上限")}</label>
+                      <Input id="edit-warp-max-nodes" type="number" min={1} max={1024} step={1}
+                        invalid={Boolean(warpEditForm.formState.errors.max_nodes)} {...warpEditForm.register("max_nodes")} />
+                      {warpEditForm.formState.errors.max_nodes?.message ? <p className="field-error">{t(warpEditForm.formState.errors.max_nodes.message)}</p> : null}
+                      <p className="muted">{t("默认 300，范围 1–1024。调大后自动补建，调小后保留延迟较低的出口并释放多余隧道，以限制内存占用。实际数量取决于可用前置节点和 IP 去重结果。")}</p>
+                    </div>
+                    <div className="callout field-span-2">{t("此订阅由系统维护，无需填写订阅链接。可在平台配置中单独排除 WARP 节点。")}</div>
+                    <div className="platform-config-actions">
+                      <Button type="submit" disabled={warpUpdateMutation.isPending}>{warpUpdateMutation.isPending ? t("保存中...") : t("保存配置")}</Button>
+                    </div>
+                  </form>
+                ) : <form className="form-grid" onSubmit={onEditSubmit}>
                   <input type="hidden" {...editForm.register("source_type")} />
 
                   <div className="subscription-switch-item field-span-2">
@@ -953,10 +1021,10 @@ export function SubscriptionPage() {
                       {updateMutation.isPending ? t("保存中...") : t("保存配置")}
                     </Button>
                   </div>
-                </form>
+                </form>}
               </section>
 
-              <section className="platform-drawer-section platform-ops-section">
+              {!isWarpSubscription(selectedSubscription) ? <section className="platform-drawer-section platform-ops-section">
                 <div className="platform-drawer-section-head">
                   <h4>{t("运维操作")}</h4>
                 </div>
@@ -1004,7 +1072,7 @@ export function SubscriptionPage() {
                     </Button>
                   </div>
                 </div>
-              </section>
+              </section> : null}
             </div>
           </Card>
         </div>

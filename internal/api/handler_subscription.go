@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/Resinat/Resin/internal/service"
+	"github.com/Resinat/Resin/internal/subscription"
 )
 
 func subscriptionMatchesKeyword(s service.SubscriptionResponse, keyword string) bool {
@@ -81,7 +82,7 @@ func HandleListSubscriptions(cp *service.ControlPlaneService) http.HandlerFunc {
 // HandleGetSubscription returns a handler for GET /api/v1/subscriptions/{id}.
 func HandleGetSubscription(cp *service.ControlPlaneService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		id, ok := requireUUIDPathParam(w, r, "id", "subscription_id")
+		id, ok := requireSubscriptionIDPathParam(w, r)
 		if !ok {
 			return
 		}
@@ -114,7 +115,7 @@ func HandleCreateSubscription(cp *service.ControlPlaneService) http.HandlerFunc 
 // HandleUpdateSubscription returns a handler for PATCH /api/v1/subscriptions/{id}.
 func HandleUpdateSubscription(cp *service.ControlPlaneService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		id, ok := requireUUIDPathParam(w, r, "id", "subscription_id")
+		id, ok := requireSubscriptionIDPathParam(w, r)
 		if !ok {
 			return
 		}
@@ -134,7 +135,7 @@ func HandleUpdateSubscription(cp *service.ControlPlaneService) http.HandlerFunc 
 // HandleDeleteSubscription returns a handler for DELETE /api/v1/subscriptions/{id}.
 func HandleDeleteSubscription(cp *service.ControlPlaneService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		id, ok := requireUUIDPathParam(w, r, "id", "subscription_id")
+		id, ok := requireSubscriptionIDPathParam(w, r)
 		if !ok {
 			return
 		}
@@ -149,7 +150,7 @@ func HandleDeleteSubscription(cp *service.ControlPlaneService) http.HandlerFunc 
 // HandleRefreshSubscription returns a handler for POST /api/v1/subscriptions/{id}/actions/refresh.
 func HandleRefreshSubscription(cp *service.ControlPlaneService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		id, ok := requireUUIDPathParam(w, r, "id", "subscription_id")
+		id, ok := requireSubscriptionIDPathParam(w, r)
 		if !ok {
 			return
 		}
@@ -165,7 +166,7 @@ func HandleRefreshSubscription(cp *service.ControlPlaneService) http.HandlerFunc
 // POST /api/v1/subscriptions/{id}/actions/cleanup-circuit-open-nodes.
 func HandleCleanupSubscriptionCircuitOpenNodes(cp *service.ControlPlaneService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		id, ok := requireUUIDPathParam(w, r, "id", "subscription_id")
+		id, ok := requireSubscriptionIDPathParam(w, r)
 		if !ok {
 			return
 		}
@@ -176,4 +177,19 @@ func HandleCleanupSubscriptionCircuitOpenNodes(cp *service.ControlPlaneService) 
 		}
 		WriteJSON(w, http.StatusOK, map[string]int{"cleaned_count": cleanedCount})
 	}
+}
+
+func requireSubscriptionIDPathParam(w http.ResponseWriter, r *http.Request) (string, bool) {
+	if r.PathValue("id") == subscription.WarpSubscriptionID {
+		return subscription.WarpSubscriptionID, true
+	}
+	return requireUUIDPathParam(w, r, "id", "subscription_id")
+}
+
+func parseOptionalSubscriptionIDQuery(w http.ResponseWriter, r *http.Request) (*string, bool) {
+	if strings.TrimSpace(r.URL.Query().Get("subscription_id")) == subscription.WarpSubscriptionID {
+		id := subscription.WarpSubscriptionID
+		return &id, true
+	}
+	return parseOptionalUUIDQuery(w, r, "subscription_id", "subscription_id")
 }

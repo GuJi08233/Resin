@@ -51,6 +51,7 @@ import { PlatformAccessPanel } from "./PlatformAccessPanel";
 import { PlatformMonitorPanel } from "./PlatformMonitorPanel";
 import { StatusCodeRuleEditor } from "./StatusCodeRuleEditor";
 import type { PlatformExclusion, PlatformLease } from "./types";
+import { allowsWarpSubscription, setWarpSubscriptionAllowed } from "./warpSubscription";
 
 type PlatformDetailTab = "monitor" | "access" | "config" | "ops";
 
@@ -759,6 +760,22 @@ export function PlatformDetailPage() {
                       <div>{t("普通正则表达式表示满足其一，* 开头表示必须包含，! 开头表示排除。")}</div>
                       <div>{t("技巧：^<订阅名>/ 可筛选来自该订阅的节点。")}</div>
                     </div>
+                  </div>
+
+                  <div className="field-group">
+                    <div className="subscription-switch-item">
+                      <label className="subscription-switch-label" htmlFor="detail-edit-allow-warp">
+                        {t("允许 WARP 订阅节点")}
+                      </label>
+                      <Switch
+                        id="detail-edit-allow-warp"
+                        checked={allowsWarpSubscription(editForm.watch("regex_filters_text"))}
+                        onChange={(event) => editForm.setValue("regex_filters_text",
+                          setWarpSubscriptionAllowed(editForm.getValues("regex_filters_text"), event.target.checked),
+                          { shouldDirty: true, shouldValidate: true })}
+                      />
+                    </div>
+                    <p className="muted">{t("关闭后，此平台排除 WARP 订阅的全部节点，其他平台不受影响。")}</p>
                   </div>
 
                   <div className="field-group">

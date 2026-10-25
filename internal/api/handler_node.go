@@ -103,7 +103,7 @@ func HandleListNodes(cp *service.ControlPlaneService) http.HandlerFunc {
 		}
 		filters.PlatformID = platformID
 
-		subscriptionID, ok := parseOptionalUUIDQuery(w, r, "subscription_id", "subscription_id")
+		subscriptionID, ok := parseOptionalSubscriptionIDQuery(w, r)
 		if !ok {
 			return
 		}

@@ -103,7 +103,7 @@ func (s *SubscriptionScheduler) ForceRefreshAll() {
 			return false
 		default:
 		}
-		if sub.Enabled() {
+		if sub.Enabled() && sub.SourceType() != subscription.SourceTypeWarp {
 			subsToRefresh = append(subsToRefresh, sub)
 		}
 		return true
@@ -136,7 +136,7 @@ func (s *SubscriptionScheduler) tick() {
 			return false
 		default:
 		}
-		if !sub.Enabled() {
+		if !sub.Enabled() || sub.SourceType() == subscription.SourceTypeWarp {
 			return true
 		}
 		// Check if due: lastChecked + interval - lookahead <= now.
@@ -191,6 +191,9 @@ func (s *SubscriptionScheduler) runUpdatesWithWorkerLimit(subs []*subscription.S
 // applies the result under WithSubLock. This keeps the lock scope narrow
 // (no I/O under lock) while still preventing concurrent diff/apply races.
 func (s *SubscriptionScheduler) UpdateSubscription(sub *subscription.Subscription) {
+	if sub.SourceType() == subscription.SourceTypeWarp {
+		return // runtime WARP membership is owned exclusively by its exit manager
+	}
 	attemptStartedNs := time.Now().UnixNano()
 	attemptSeq := sub.NextAttemptSeq()
 	attemptURL := sub.URL()
@@ -385,6 +388,11 @@ func (s *SubscriptionScheduler) handleUpdateFailure(
 // routable views. Disabling a subscription makes its nodes invisible to
 // platform tag-regex matching; enabling makes them visible again.
 func (s *SubscriptionScheduler) SetSubscriptionEnabled(sub *subscription.Subscription, enabled bool) {
+	if sub.SourceType() == subscription.SourceTypeWarp {
+		sub.SetEnabled(enabled)
+		s.pool.RebuildAllPlatforms()
+		return
+	}
 	wasEnabled := false
 	var candidateHashes []node.Hash
 	wasDisabled := make(map[node.Hash]struct{})
@@ -431,6 +439,9 @@ func (s *SubscriptionScheduler) SetSubscriptionEnabled(sub *subscription.Subscri
 // RenameSubscription updates the subscription name and re-triggers platform
 // re-evaluation for all managed nodes (since tags include the sub name).
 func (s *SubscriptionScheduler) RenameSubscription(sub *subscription.Subscription, newName string) {
+	if sub.SourceType() == subscription.SourceTypeWarp {
+		return
+	}
 	sub.WithOpLock(func() {
 		sub.SetName(newName)
 		// Re-add all managed hashes to trigger platform re-filter.

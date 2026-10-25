@@ -16,6 +16,11 @@ const DEFAULT_CONFIG: RuntimeConfig = {
   max_egress_test_interval: "",
   latency_test_url: "",
   latency_authorities: [],
+  warp_enabled: false,
+  warp_stack: "dual",
+  warp_exits_per_family: 1,
+  warp_max_nodes: 300,
+  warp_reconnect_attempts: 3,
   p2c_latency_window: "",
   latency_decay_window: "",
   cache_flush_interval: "",
@@ -72,6 +77,11 @@ function normalizeRuntimeConfig(raw: Partial<RuntimeConfig> | null | undefined):
     latency_authorities: Array.isArray(raw.latency_authorities)
       ? raw.latency_authorities.filter((item): item is string => typeof item === "string")
       : DEFAULT_CONFIG.latency_authorities,
+    warp_enabled: Boolean(raw.warp_enabled),
+    warp_stack: raw.warp_stack === "ipv4" || raw.warp_stack === "ipv6" ? raw.warp_stack : "dual",
+    warp_exits_per_family: asNumber(raw.warp_exits_per_family, DEFAULT_CONFIG.warp_exits_per_family),
+    warp_max_nodes: asNumber(raw.warp_max_nodes, DEFAULT_CONFIG.warp_max_nodes),
+    warp_reconnect_attempts: asNumber(raw.warp_reconnect_attempts, DEFAULT_CONFIG.warp_reconnect_attempts),
     p2c_latency_window: asString(raw.p2c_latency_window, DEFAULT_CONFIG.p2c_latency_window),
     latency_decay_window: asString(raw.latency_decay_window, DEFAULT_CONFIG.latency_decay_window),
     cache_flush_interval: asString(raw.cache_flush_interval, DEFAULT_CONFIG.cache_flush_interval),

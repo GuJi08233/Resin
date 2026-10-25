@@ -23,6 +23,13 @@ type RuntimeConfig struct {
 	LatencyTestURL     string   `json:"latency_test_url"`
 	LatencyAuthorities []string `json:"latency_authorities"`
 
+	// WARP derived exits. Original subscription nodes remain available.
+	WarpEnabled           bool   `json:"warp_enabled"`
+	WarpStack             string `json:"warp_stack"`
+	WarpExitsPerFamily    int    `json:"warp_exits_per_family"`
+	WarpMaxNodes          int    `json:"warp_max_nodes"`
+	WarpReconnectAttempts int    `json:"warp_reconnect_attempts"`
+
 	// P2C
 	P2CLatencyWindow   Duration `json:"p2c_latency_window"`
 	LatencyDecayWindow Duration `json:"latency_decay_window"`
@@ -50,6 +57,12 @@ func NewDefaultRuntimeConfig() *RuntimeConfig {
 
 		LatencyTestURL:     "https://www.gstatic.com/generate_204",
 		LatencyAuthorities: []string{"gstatic.com", "google.com", "cloudflare.com", "github.com"},
+
+		WarpEnabled:           false,
+		WarpStack:             "dual",
+		WarpExitsPerFamily:    1,
+		WarpMaxNodes:          300,
+		WarpReconnectAttempts: 3,
 
 		P2CLatencyWindow:   Duration(10 * time.Minute),
 		LatencyDecayWindow: Duration(10 * time.Minute),

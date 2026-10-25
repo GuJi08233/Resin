@@ -323,7 +323,9 @@ Resin 从订阅中获取节点配置。
 * 纯文本 HTTP 代理行列表（`IP:PORT` 或 `IP:PORT:USER:PASS`，支持 IPv4/IPv6）。
 * 对上述文本内容的 base64 包裹形式（先解码再解析）。
 
-解析结果会过滤出 Resin 支持的出站类型：socks、http、shadowsocks、vmess、trojan、wireguard、hysteria、vless、shadowtls、tuic、hysteria2、anytls、tor、ssh、naive，并返回节点原始 JSON 数据（`RawOptions`）及原始 Tag。
+解析结果会过滤出 Resin 支持的出站类型：socks、http、shadowsocks、vmess、trojan、wireguard、hysteria、vless、shadowtls、tuic、hysteria2、anytls、tor、ssh、naive、mieru，并返回节点原始 JSON 数据（`RawOptions`）及原始 Tag。
+
+`mieru` 为 Resin 注册的自定义出站类型，使用官方 `github.com/enfein/mieru/v3` 客户端，而非依赖 sing-box 原生协议支持。Clash/Mihomo 的 `port`、`handshake-mode` 分别转换为 `server_port`、`handshake_mode`，保留 `username`、`password`、`multiplexing`，并将外层 `transport` 规范为 `tcp` 或 `udp`。出站提供 TCP 和 UDP 目标拨号，外层 TCP 仍可承载 WARP 所需的 UDP；节点关闭时释放客户端及其借出的连接。
 
 统一使用 `ParseGeneralSubscription` 作为订阅解析入口。
 
@@ -1073,6 +1075,11 @@ Resin 需要做实事与历史的统计数据，用于 Dashboard 展示。
   "max_egress_test_interval": "24h",
   "latency_test_url": "https://www.gstatic.com/generate_204",
   "latency_authorities": ["gstatic.com", "google.com", "cloudflare.com", "github.com"],
+  "warp_enabled": false,
+  "warp_stack": "dual",
+  "warp_exits_per_family": 1,
+  "warp_max_nodes": 300,
+  "warp_reconnect_attempts": 3,
   "p2c_latency_window": "10m",
   "latency_decay_window": "10m",
   "cache_flush_interval": "5m",
@@ -1100,6 +1107,11 @@ Resin 需要做实事与历史的统计数据，用于 Dashboard 展示。
   "max_egress_test_interval": "24h",
   "latency_test_url": "https://www.gstatic.com/generate_204",
   "latency_authorities": ["gstatic.com", "google.com", "cloudflare.com", "github.com"],
+  "warp_enabled": false,
+  "warp_stack": "dual",
+  "warp_exits_per_family": 1,
+  "warp_max_nodes": 300,
+  "warp_reconnect_attempts": 3,
   "p2c_latency_window": "10m",
   "latency_decay_window": "10m",
   "cache_flush_interval": "5m",
@@ -2410,6 +2422,17 @@ Resin 支持通过 API (`PATCH /system/config`) 动态调整大部分全局运�
 #### P2C 选路设置
 * `P2CLatencyWindow`: 在 P2C 选路时，仅考虑该时间窗口内更新过的延迟数据。默认 10 分钟。
 * `LatencyDecayWindow`: TD-EWMA 算法的时间衰减窗口。默认 10 分钟。
+
+#### WARP 派生出口
+* `WarpEnabled` (`warp_enabled`): 默认 False。由统一 WARP 系统订阅的 `enabled` 配置管理，旧运行时 API 字段保留兼容。启用后为现有可承载 UDP 的节点建立 WARP 派生出口，原始节点继续可用。后台向 Cloudflare 注册设备，注册 HTTP 与外层 WireGuard UDP 均走父节点，不允许父节点失败后回落宿主机直连。
+* `WarpStack` (`warp_stack`): 默认 `dual`，可选 `ipv4`、`ipv6`、`dual`；双栈同时建立 IPv4、IPv6 出口。
+* `WarpExitsPerFamily` (`warp_exits_per_family`): 默认 1，允许 1–8，每个父节点每地址族的起始出口数。后台按统一订阅总上限和可用父节点数自动增加候选 slot，不作为最终每父节点硬上限；同一前置可同时承载多个 IPv4、IPv6 出口。
+* `WarpMaxNodes` (`warp_max_nodes`): 默认 300，允许 1–1024，限制派生出口总数，不包含原始订阅节点。由 WARP 系统订阅的 `max_nodes` 配置管理，旧运行时 API 字段保留兼容。调大后后台继续补建，调小后释放较慢的多余隧道。
+* `WarpReconnectAttempts` (`warp_reconnect_attempts`): 默认 3，允许 1–10，限制遇到重复公网 IP 时建立候选的次数。按完整 IPv4/IPv6 地址去重，尝试耗尽仍重复时，同 IP 的 WARP 线路只保留探测延迟最低者。
+
+系统维护一个固定 ID `system-warp`、名称 `WARP`、来源类型 `warp` 的统一订阅。所有 WARP 派生出口只归属于该订阅，并保留父节点关联；原订阅仅包含原始节点。其启用开关和总上限在订阅配置中通过 `PATCH /api/v1/subscriptions/system-warp` 的 `enabled`、`max_nodes` 保存，配置沿用运行时设置持久化，派生节点和隧道凭据仅在内存中。系统订阅不执行远程刷新、临时节点淘汰或删除操作。平台可独立排除该订阅节点，等效标签规则为 `!^WARP/`，不影响其他平台。
+
+关闭 WARP 订阅或移除父节点时清理对应派生出口。隧道使用用户态网络栈，无需 TUN、root 或系统路由变更；构建需要 `with_wireguard with_gvisor`。HTTP 等仅 TCP 节点不适用。Cloudflare 出口可能共享且重连后不变，因此不保证公网 IP 数量翻倍或达到配置上限。旧数据库中缺失的 WARP 字段使用内置默认值。
 
 #### 持久化设置
 * `CacheFlushInterval`: 运行时脏数据（Cache）刷盘到磁盘的时间间隔。默认 5 分钟。

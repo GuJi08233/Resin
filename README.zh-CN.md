@@ -5,12 +5,12 @@
 </div>
 
 <p align="center">
-  <a href="https://github.com/Resinat/Resin/releases"><img src="https://img.shields.io/github/v/release/Resinat/Resin?style=flat-square&label=release&sort=semver" alt="Release" /></a>
+  <a href="https://github.com/GuJi08233/Resin/releases"><img src="https://img.shields.io/github/v/release/GuJi08233/Resin?style=flat-square&label=release&sort=semver" alt="Release" /></a>
   <a href="https://github.com/Resinat/Resin/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflow/status/Resinat/Resin/release.yml?style=flat-square&label=release%20pipeline" alt="Release Pipeline" /></a>
-  <a href="https://github.com/Resinat/Resin/pkgs/container/resin"><img src="https://img.shields.io/badge/ghcr-ghcr.io%2Fresinat%2Fresin-2496ED?style=flat-square&logo=docker&logoColor=white" alt="GHCR Image" /></a>
+  <a href="https://github.com/GuJi08233/Resin/pkgs/container/resin"><img src="https://img.shields.io/badge/ghcr-ghcr.io%2Fguji08233%2Fresin-2496ED?style=flat-square&logo=docker&logoColor=white" alt="GHCR Image" /></a>
   <a href="https://github.com/Resinat/Resin/blob/master/LICENSE"><img src="https://img.shields.io/github/license/Resinat/Resin?style=flat-square" alt="License" /></a>
   <a href="https://github.com/Resinat/Resin/blob/master/go.mod"><img src="https://img.shields.io/github/go-mod/go-version/Resinat/Resin?style=flat-square" alt="Go Version" /></a>
-  <a href="https://github.com/Resinat/Resin/releases"><img src="https://img.shields.io/badge/support-linux%20%7C%20macOS%20%7C%20windows%20%C2%B7%20amd64%20%7C%20arm64-0A7EA4?style=flat-square" alt="Support Matrix" /></a>
+  <a href="https://github.com/GuJi08233/Resin/releases"><img src="https://img.shields.io/badge/support-linux%20%7C%20macOS%20%7C%20windows%20%C2%B7%20amd64%20%7C%20arm64-0A7EA4?style=flat-square" alt="Support Matrix" /></a>
   <a href="DESIGN.md"><img src="https://img.shields.io/badge/docs-DESIGN.md-1F6FEB?style=flat-square" alt="Design Docs" /></a>
 </p>
 
@@ -63,9 +63,50 @@
 
 ### 支持的出站节点协议类型
 
-- 对于 sing-box JSON/原始 outbounds：`socks`、`http`、`shadowsocks`、`vmess`、`trojan`、`wireguard`、`hysteria`、`vless`、`shadowtls`、`tuic`、`hysteria2`、`anytls`、`ssh`。
-- 对于 Clash 转换：`ss`/`shadowsocks`、`socks`/`socks4`/`socks4a`/`socks5`、`http`、`vmess`、`vless`、`trojan`、`wireguard`/`wg`、`hysteria`、`hysteria2`/`hy2`、`tuic`、`anytls`、`ssh`。
+- 对于 sing-box JSON/原始 outbounds：`socks`、`http`、`shadowsocks`、`vmess`、`trojan`、`wireguard`、`hysteria`、`vless`、`shadowtls`、`tuic`、`hysteria2`、`anytls`、`ssh`，以及 Resin 扩展的 `mieru`。
+- 对于 Clash 转换：`ss`/`shadowsocks`、`socks`/`socks4`/`socks4a`/`socks5`、`http`、`vmess`、`vless`、`trojan`、`wireguard`/`wg`、`hysteria`、`hysteria2`/`hy2`、`tuic`、`anytls`、`ssh`、`mieru`。
 
+Mieru 使用官方 Go 客户端，支持下面的 Clash/Mihomo 配置，可通过远程或本地订阅导入；也支持直接粘贴裸 YAML 节点列表：
+
+```yaml
+proxies:
+  - name: Mieru example
+    type: mieru
+    server: mieru.example.com
+    port: 2012
+    transport: TCP
+    handshake-mode: HANDSHAKE_NO_WAIT
+    username: example-user
+    password: example-password
+    multiplexing: MULTIPLEXING_HIGH
+```
+
+`transport` 支持 `TCP`、`UDP`，握手和多路复用参数会传递给官方客户端；省略时分别使用 `TCP`、`HANDSHAKE_STANDARD`、`MULTIPLEXING_LOW`。目标 TCP、UDP 流量均可承载，因此外层使用 TCP 的 Mieru 节点也可以作为 WARP 前置。`outbounds` JSON 中的 `mieru` 为 Resin 自定义扩展，使用 `server_port`、`handshake_mode` 等下划线字段，不代表上游 sing-box 1.12 原生支持此类型。
+
+
+## Cloudflare WARP 派生出口
+
+WebUI「订阅管理」自动提供一个系统维护的 **WARP** 订阅，统一管理所有 WARP 派生出口。编辑该订阅可启停 WARP，并调整出口总上限，默认 **300**、范围 **1–1024**。调大后后台自动补建；调小后保留延迟较低的出口并释放多余隧道，以限制内存占用。禁用该订阅会关闭 WARP 隧道，原始节点继续可用。此系统订阅无需 URL，不提供删除或手动拉取操作。
+
+Resin 在现有支持 UDP 的代理节点上叠加用户态 WARP 隧道。同一个父节点可作为多条 WARP 隧道的前置，支持同时生成 IPv4、IPv6 出口；当父节点较少时，会逐步增加每个父节点的隧道，尝试填充配置上限。实际数量取决于可用前置节点及去重结果。WARP 派生节点只归属统一的 WARP 订阅，同时保留父节点关联。注册请求和 WireGuard 数据都经过对应父节点；HTTP 等仅 TCP 节点无法承载 WARP，不会改用宿主机直接建立隧道。无需 TUN、root 或 `NET_ADMIN`；自编译须包含 `with_wireguard with_gvisor`，项目 Docker 和发布构建已包含。
+
+在某个平台中禁用这些出口，可关闭该平台的「允许 WARP 订阅节点」选项；等效标签排除规则为 `!^WARP/`。需要仅使用 WARP 出口时，可使用正向规则 `^WARP/`。平台级排除不会关闭其他平台使用的 WARP 隧道。
+
+订阅配置通过 `PATCH /api/v1/subscriptions/system-warp` 保存，例如：
+
+```json
+{"enabled": true, "max_nodes": 300}
+```
+
+| 运行时字段 | 默认值 | 含义 |
+|---|---|---|
+| `warp_stack` | `dual` | `ipv4`、`ipv6` 或 `dual`；双栈可同时建立 IPv4、IPv6 出口。 |
+| `warp_exits_per_family` | `1` | 每个父节点每地址族的起始出口数，范围 1–8；为达到订阅上限可自动继续扩展。 |
+| `warp_reconnect_attempts` | `3` | IP 去重时建立候选出口的最大尝试次数，范围 1–10。 |
+
+表中高级参数仍在「系统配置」调整，支持 `PATCH /api/v1/system/config` 热更新。旧 API 的 `warp_enabled` 和 `warp_max_nodes` 保留兼容，分别对应 WARP 订阅的 `enabled` 与 `max_nodes`，总上限默认值为 300。派生出口按实际探测的公网 IP 去重（IPv4、IPv6 分别按完整地址比较）；发现重复时重新建立 WARP，达到次数上限仍重复时，同 IP 的 WARP 线路仅保留延迟最低者。Cloudflare 可能一直分配共享出口，重连不保证得到新 IP，也不保证出口数量翻倍。IPv6 出口还受父节点的 UDP 能力及 Cloudflare 网络条件影响。
+
+出口在后台逐个预热，WARP 设备注册间隔至少 12 秒。创建失败后等待 1 分钟再试，重复 IP 的落选线路等待 5 分钟再尝试；不会持续无限重连。派生隧道与设备凭据只保存在内存中，重启后重新建立。每次重连使用独立节点标识，旧请求或探测结果不会覆盖新出口状态。
 
 ## 🚀 Quick Start
 
@@ -78,7 +119,7 @@
 # docker-compose.yml
 services:
   resin:
-    image: ghcr.io/resinat/resin:latest
+    image: ghcr.io/guji08233/resin:latest
     container_name: resin
     restart: unless-stopped
     environment:
@@ -93,7 +134,12 @@ services:
       - ./data/state:/var/lib/resin
       - ./data/log:/var/log/resin
 ```
-运行 `docker compose up -d` 启动服务。
+向本仓库的 `master` 分支推送后，GitHub Actions 会自动构建并发布 `ghcr.io/guji08233/resin` 的 `latest`、`master` 和 `sha-*` 镜像。使用本分支的 WARP、Mieru 功能前，请先拉取新镜像并重建容器：
+
+```bash
+docker compose pull
+docker compose up -d
+```
 
 自定义接入点端口还必须能从容器外访问。Docker 无法为已运行容器动态增加端口映射，因此请在 `ports` 中提前映射所需端口范围（例如 `"2300-2399:2300-2399"`），或在适合的环境中使用 host 网络。
 
@@ -294,7 +340,7 @@ curl "http://127.0.0.1:2260/my-token/MyPlatform/https/api.example.com/v1/orders"
 <details>
 <summary><b>方式一：运行预编译二进制文件</b></summary>
 <br>
-前往项目的 <a href="https://github.com/Resinat/Resin/releases">Release</a> 页面，下载适合你操作系统架构的程序包。解压得到单个二进制文件 <code>resin</code>。
+前往项目的 <a href="https://github.com/GuJi08233/Resin/releases">Release</a> 页面，下载适合你操作系统架构的程序包。解压得到单个二进制文件 <code>resin</code>。
 
 ```bash
 RESIN_ADMIN_TOKEN=【管理面板密码】 \
@@ -327,7 +373,7 @@ RESIN_PORT=2260
 
 ```bash
 # 1. 下载 Resin 源码
-git clone https://github.com/Resinat/Resin.git
+git clone https://github.com/GuJi08233/Resin.git
 
 # 2. 编译 WebUI
 cd Resin/webui
@@ -335,7 +381,7 @@ npm install && npm run build
 cd ..
 
 # 3. 编译 resin 核心
-go build -tags "with_quic with_wireguard with_grpc with_utls" -o resin ./cmd/resin
+go build -tags "with_quic with_wireguard with_gvisor with_grpc with_utls" -o resin ./cmd/resin
 
 # 4. 运行程序
 RESIN_ADMIN_TOKEN=【管理面板密码】 \

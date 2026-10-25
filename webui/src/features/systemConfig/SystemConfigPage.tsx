@@ -5,6 +5,7 @@ import { Badge } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { Input } from "../../components/ui/Input";
+import { Select } from "../../components/ui/Select";
 import { Switch } from "../../components/ui/Switch";
 import { Textarea } from "../../components/ui/Textarea";
 import { ToastContainer } from "../../components/ui/Toast";
@@ -13,6 +14,8 @@ import i18next, { useI18n } from "../../i18n";
 import { formatApiErrorMessage } from "../../lib/error-message";
 import { getEnvConfig, patchSystemConfig, getSystemConfig, getDefaultSystemConfig } from "./api";
 import type { RuntimeConfig, RuntimeConfigPatch } from "./types";
+
+type EditableRuntimeConfig = Omit<RuntimeConfig, "warp_enabled" | "warp_max_nodes">;
 
 type RuntimeConfigForm = {
   request_log_enabled: boolean;
@@ -27,13 +30,16 @@ type RuntimeConfigForm = {
   max_egress_test_interval: string;
   latency_test_url: string;
   latency_authorities_raw: string;
+  warp_stack: RuntimeConfig["warp_stack"];
+  warp_exits_per_family: string;
+  warp_reconnect_attempts: string;
   p2c_latency_window: string;
   latency_decay_window: string;
   cache_flush_interval: string;
   cache_flush_dirty_threshold: string;
 };
 
-const EDITABLE_FIELDS: Array<keyof RuntimeConfig> = [
+const EDITABLE_FIELDS: Array<keyof EditableRuntimeConfig> = [
   "request_log_enabled",
   "reverse_proxy_log_detail_enabled",
   "reverse_proxy_log_req_headers_max_bytes",
@@ -46,6 +52,9 @@ const EDITABLE_FIELDS: Array<keyof RuntimeConfig> = [
   "max_egress_test_interval",
   "latency_test_url",
   "latency_authorities",
+  "warp_stack",
+  "warp_exits_per_family",
+  "warp_reconnect_attempts",
   "p2c_latency_window",
   "latency_decay_window",
   "cache_flush_interval",
@@ -65,6 +74,11 @@ const FIELD_LABELS: Record<keyof RuntimeConfig, string> = {
   max_egress_test_interval: "出口 IP 更新检查间隔",
   latency_test_url: "延迟测试目标 URL",
   latency_authorities: "延迟测试权威域名列表",
+  warp_enabled: "启用 WARP 派生出口",
+  warp_stack: "WARP 出口地址族",
+  warp_exits_per_family: "每节点每地址族起始出口数",
+  warp_max_nodes: "WARP 派生出口上限",
+  warp_reconnect_attempts: "WARP 去重尝试次数",
   p2c_latency_window: "P2C 延迟衰减窗口",
   latency_decay_window: "历史延迟衰减窗口",
   cache_flush_interval: "缓存异步刷盘间隔",
@@ -102,6 +116,9 @@ function configToForm(config: RuntimeConfig): RuntimeConfigForm {
     max_egress_test_interval: config.max_egress_test_interval,
     latency_test_url: config.latency_test_url,
     latency_authorities_raw: config.latency_authorities.join("\n"),
+    warp_stack: config.warp_stack,
+    warp_exits_per_family: String(config.warp_exits_per_family),
+    warp_reconnect_attempts: String(config.warp_reconnect_attempts),
     p2c_latency_window: config.p2c_latency_window,
     latency_decay_window: config.latency_decay_window,
     cache_flush_interval: config.cache_flush_interval,
@@ -133,6 +150,16 @@ function parseDurationField(field: string, raw: string): string {
   return value;
 }
 
+function parseBoundedInt(field: string, raw: string, min: number, max: number): number {
+  const parsed = parseNonNegativeInt(field, raw);
+  if (parsed < min || parsed > max) {
+    throw new Error(i18next.t("{{field}} 必须是 {{min}} 到 {{max}} 之间的整数", {
+      field: requiredFieldLabel(field), min, max,
+    }));
+  }
+  return parsed;
+}
+
 function parseAuthorities(raw: string): string[] {
   const items = raw
     .split(/[\n,]/)
@@ -142,7 +169,7 @@ function parseAuthorities(raw: string): string[] {
   return Array.from(new Set(items));
 }
 
-function parseForm(form: RuntimeConfigForm): RuntimeConfig {
+function parseForm(form: RuntimeConfigForm): EditableRuntimeConfig {
   const latencyURL = form.latency_test_url.trim();
   if (!latencyURL) {
     throw new Error("延迟测试目标 URL 不能为空");
@@ -176,6 +203,9 @@ function parseForm(form: RuntimeConfigForm): RuntimeConfig {
     max_egress_test_interval: parseDurationField("出口 IP 更新检查间隔", form.max_egress_test_interval),
     latency_test_url: latencyURL,
     latency_authorities: parseAuthorities(form.latency_authorities_raw),
+    warp_stack: form.warp_stack,
+    warp_exits_per_family: parseBoundedInt("每节点每地址族起始出口数", form.warp_exits_per_family, 1, 8),
+    warp_reconnect_attempts: parseBoundedInt("WARP 去重尝试次数", form.warp_reconnect_attempts, 1, 10),
     p2c_latency_window: parseDurationField("P2C 延迟衰减窗口", form.p2c_latency_window),
     latency_decay_window: parseDurationField("历史延迟衰减窗口", form.latency_decay_window),
     cache_flush_interval: parseDurationField("缓存异步刷盘间隔", form.cache_flush_interval),
@@ -207,7 +237,7 @@ function arrayEquals(a: string[], b: string[]): boolean {
   return true;
 }
 
-function buildPatch(current: RuntimeConfig, next: RuntimeConfig): RuntimeConfigPatch {
+function buildPatch(current: RuntimeConfig, next: EditableRuntimeConfig): RuntimeConfigPatch {
   const patch: RuntimeConfigPatch = {};
   const patchMutable = patch as Record<string, unknown>;
 
@@ -268,7 +298,7 @@ export function SystemConfigPage() {
 
   const parsedResult = useMemo(() => {
     if (!form) {
-      return { config: null as RuntimeConfig | null, error: "" };
+      return { config: null as EditableRuntimeConfig | null, error: "" };
     }
 
     try {
@@ -673,6 +703,53 @@ export function SystemConfigPage() {
                     />
                   </div>
                 </div>
+              </section>
+
+              <section className="syscfg-section">
+                <h4>{t("Cloudflare WARP 出口")}</h4>
+                <p className="muted">{t("为支持 UDP 的原节点叠加 WARP，保留原始出口。开启后会在后台注册 Cloudflare WARP 设备，无需 TUN 或 root 权限。")}</p>
+                <p className="muted">{t("WARP 的启停和出口总上限在「订阅管理」中的 WARP 订阅配置，默认最多 300 个出口。")}</p>
+                <div className="form-grid" style={{ marginTop: "16px" }}>
+                  <div className="field-group">
+                    <div style={{ display: "flex", alignItems: "center" }}>
+                      <label className="field-label" htmlFor="sys-warp-stack" style={{ margin: 0 }}>{t("WARP 出口地址族")}</label>
+                      {renderRestoreButton("warp_stack")}
+                    </div>
+                    <Select
+                      id="sys-warp-stack"
+                      value={form.warp_stack}
+                      onChange={(event) => setFormField("warp_stack", event.target.value as RuntimeConfig["warp_stack"])}
+                    >
+                      <option value="dual">{t("IPv4 和 IPv6")}</option>
+                      <option value="ipv4">IPv4</option>
+                      <option value="ipv6">IPv6</option>
+                    </Select>
+                  </div>
+                  <div className="field-group">
+                    <div style={{ display: "flex", alignItems: "center" }}>
+                      <label className="field-label" htmlFor="sys-warp-per-family" style={{ margin: 0 }}>{t("每节点每地址族起始出口数")}</label>
+                      {renderRestoreButton("warp_exits_per_family")}
+                    </div>
+                    <Input
+                      id="sys-warp-per-family" type="number" min={1} max={8}
+                      value={form.warp_exits_per_family}
+                      onChange={(event) => setFormField("warp_exits_per_family", event.target.value)}
+                    />
+                  </div>
+                  <div className="field-group">
+                    <div style={{ display: "flex", alignItems: "center" }}>
+                      <label className="field-label" htmlFor="sys-warp-attempts" style={{ margin: 0 }}>{t("WARP 去重尝试次数")}</label>
+                      {renderRestoreButton("warp_reconnect_attempts")}
+                    </div>
+                    <Input
+                      id="sys-warp-attempts" type="number" min={1} max={10}
+                      value={form.warp_reconnect_attempts}
+                      onChange={(event) => setFormField("warp_reconnect_attempts", event.target.value)}
+                    />
+                  </div>
+                </div>
+                <p className="muted">{t("每个父节点可按地址族建立多个出口，系统会按订阅上限逐步补建。重复 IP 会有限重连，仍重复时仅保留同 IP 中延迟最低的 WARP 线路。")}</p>
+                <p className="muted">{t("HTTP 等仅支持 TCP 的节点无法承载 WARP。Cloudflare 可能分配相同出口，重连不保证换 IP，也不保证出口数量翻倍。")}</p>
               </section>
 
               <section className="syscfg-section">

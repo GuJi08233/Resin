@@ -1,7 +1,9 @@
 export type Subscription = {
   id: string;
   name: string;
-  source_type: "remote" | "local";
+  source_type: "remote" | "local" | "warp";
+  managed?: boolean;
+  max_nodes?: number;
   url: string;
   content: string;
   update_interval: string;
@@ -37,6 +39,7 @@ export type SubscriptionCreateInput = {
 };
 
 export type SubscriptionUpdateInput = {
+  max_nodes?: number;
   name?: string;
   url?: string;
   content?: string;

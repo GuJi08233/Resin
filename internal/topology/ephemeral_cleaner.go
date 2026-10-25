@@ -72,7 +72,7 @@ func (c *EphemeralCleaner) sweepWithHook(betweenScans func()) {
 	ephemeralSubs := make([]ephemeralSub, 0, c.subManager.Size())
 
 	c.subManager.Range(func(id string, sub *subscription.Subscription) bool {
-		if sub.Ephemeral() {
+		if sub.Ephemeral() && sub.SourceType() != subscription.SourceTypeWarp {
 			ephemeralSubs = append(ephemeralSubs, ephemeralSub{id: id, sub: sub})
 		}
 		return true
@@ -110,6 +110,9 @@ func (c *EphemeralCleaner) sweepOneSubscription(
 	now int64,
 	betweenScans func(),
 ) {
+	if sub.SourceType() == subscription.SourceTypeWarp {
+		return
+	}
 	var (
 		evictCount    int
 		evictedHashes []node.Hash

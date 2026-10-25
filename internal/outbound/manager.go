@@ -64,6 +64,11 @@ func (m *OutboundManager) EnsureNodeOutbound(hash node.Hash) {
 	if !ok {
 		return
 	}
+	// Runtime-derived outbounds are established and owned by the WARP manager;
+	// their internal descriptor is not a sing-box subscription configuration.
+	if entry.ParentHash != nil {
+		return
+	}
 	// Fast path: already has outbound.
 	if entry.Outbound.Load() != nil {
 		return

@@ -7,12 +7,12 @@
 </div>
 
 <p align="center">
-  <a href="https://github.com/Resinat/Resin/releases"><img src="https://img.shields.io/github/v/release/Resinat/Resin?style=flat-square&label=release&sort=semver" alt="Release" /></a>
+  <a href="https://github.com/GuJi08233/Resin/releases"><img src="https://img.shields.io/github/v/release/GuJi08233/Resin?style=flat-square&label=release&sort=semver" alt="Release" /></a>
   <a href="https://github.com/Resinat/Resin/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflow/status/Resinat/Resin/release.yml?style=flat-square&label=release%20pipeline" alt="Release Pipeline" /></a>
-  <a href="https://github.com/Resinat/Resin/pkgs/container/resin"><img src="https://img.shields.io/badge/ghcr-ghcr.io%2Fresinat%2Fresin-2496ED?style=flat-square&logo=docker&logoColor=white" alt="GHCR Image" /></a>
+  <a href="https://github.com/GuJi08233/Resin/pkgs/container/resin"><img src="https://img.shields.io/badge/ghcr-ghcr.io%2Fguji08233%2Fresin-2496ED?style=flat-square&logo=docker&logoColor=white" alt="GHCR Image" /></a>
   <a href="https://github.com/Resinat/Resin/blob/master/LICENSE"><img src="https://img.shields.io/github/license/Resinat/Resin?style=flat-square" alt="License" /></a>
   <a href="https://github.com/Resinat/Resin/blob/master/go.mod"><img src="https://img.shields.io/github/go-mod/go-version/Resinat/Resin?style=flat-square" alt="Go Version" /></a>
-  <a href="https://github.com/Resinat/Resin/releases"><img src="https://img.shields.io/badge/support-linux%20%7C%20macOS%20%7C%20windows%20%C2%B7%20amd64%20%7C%20arm64-0A7EA4?style=flat-square" alt="Support Matrix" /></a>
+  <a href="https://github.com/GuJi08233/Resin/releases"><img src="https://img.shields.io/badge/support-linux%20%7C%20macOS%20%7C%20windows%20%C2%B7%20amd64%20%7C%20arm64-0A7EA4?style=flat-square" alt="Support Matrix" /></a>
   <a href="DESIGN.md"><img src="https://img.shields.io/badge/docs-DESIGN.md-1F6FEB?style=flat-square" alt="Design Docs" /></a>
 </p>
 
@@ -63,8 +63,49 @@ It helps shield your services from unstable underlying proxy nodes by aggregatin
 
 ### Supported outbound node types
 
-- For sing-box JSON/raw outbounds: `socks`, `http`, `shadowsocks`, `vmess`, `trojan`, `wireguard`, `hysteria`, `vless`, `shadowtls`, `tuic`, `hysteria2`, `anytls`, `ssh`.
-- For Clash conversion: `ss`/`shadowsocks`, `socks`/`socks4`/`socks4a`/`socks5`, `http`, `vmess`, `vless`, `trojan`, `wireguard`/`wg`, `hysteria`, `hysteria2`/`hy2`, `tuic`, `anytls`, `ssh`.
+- For sing-box JSON/raw outbounds: `socks`, `http`, `shadowsocks`, `vmess`, `trojan`, `wireguard`, `hysteria`, `vless`, `shadowtls`, `tuic`, `hysteria2`, `anytls`, `ssh`, and Resin's `mieru` extension.
+- For Clash conversion: `ss`/`shadowsocks`, `socks`/`socks4`/`socks4a`/`socks5`, `http`, `vmess`, `vless`, `trojan`, `wireguard`/`wg`, `hysteria`, `hysteria2`/`hy2`, `tuic`, `anytls`, `ssh`, `mieru`.
+
+Mieru uses the official Go client. Import Clash/Mihomo YAML or JSON subscriptions, or paste a bare YAML node list:
+
+```yaml
+proxies:
+  - name: Mieru example
+    type: mieru
+    server: mieru.example.com
+    port: 2012
+    transport: TCP
+    handshake-mode: HANDSHAKE_NO_WAIT
+    username: example-user
+    password: example-password
+    multiplexing: MULTIPLEXING_HIGH
+```
+
+Both `TCP` and `UDP` outer transports are supported. Handshake and multiplexing settings are passed to the official client; omitted settings default to `TCP`, `HANDSHAKE_STANDARD`, and `MULTIPLEXING_LOW`, respectively. Mieru carries TCP and UDP destinations, so a TCP-transport Mieru node can also serve as a WARP parent. The `mieru` type in `outbounds` JSON is a Resin extension, using snake-case fields such as `server_port` and `handshake_mode`; upstream sing-box 1.12 does not natively implement it.
+
+## Derived Cloudflare WARP Exits
+
+The WebUI automatically provides a system-managed **WARP** entry under **Subscriptions** for all derived WARP exits. Edit it to enable or disable WARP and adjust the total exit limit: **300** by default, range **1–1024**. Raising the limit creates more exits in the background; lowering it keeps lower-latency exits and releases surplus tunnels to limit memory use. Disabling closes the WARP tunnels while original nodes remain available. This subscription needs no URL and has no delete or manual-fetch action.
+
+WARP tunnels run over existing UDP-capable proxy nodes. One parent can carry multiple independent tunnels with both IPv4 and IPv6 exits; when there are few parents, more tunnels per parent are created to try to fill the configured limit. Actual capacity depends on available parents and deduplication results. Derived exits belong only to the unified WARP subscription while retaining their parent relationship. Both registration requests and WireGuard packets use that parent. TCP-only nodes cannot carry WARP, and there is no direct-host fallback. No TUN device, root access, or `NET_ADMIN` is required. Custom builds need `with_wireguard with_gvisor`, which are already enabled in the Docker and release builds.
+
+To exclude these exits from one platform, turn off **Allow WARP subscription nodes** in that platform's settings; the equivalent exclusion rule is `!^WARP/`. Use the positive rule `^WARP/` to select only WARP exits. Platform exclusions do not close tunnels used by other platforms.
+
+Subscription settings are persisted through `PATCH /api/v1/subscriptions/system-warp`, for example:
+
+```json
+{"enabled": true, "max_nodes": 300}
+```
+
+| Runtime field | Default | Description |
+|---|---|---|
+| `warp_stack` | `dual` | `ipv4`, `ipv6`, or `dual`; dual stack creates both IPv4 and IPv6 exits. |
+| `warp_exits_per_family` | `1` | Initial exits per parent per family, 1–8; additional tunnels can be created to reach the subscription limit. |
+| `warp_reconnect_attempts` | `3` | Maximum candidate creation attempts when deduplicating IPs, 1–10. |
+
+The advanced fields in the table remain under **System Configuration** and support hot updates through `PATCH /api/v1/system/config`. The legacy API fields `warp_enabled` and `warp_max_nodes` remain compatible aliases for the WARP subscription's `enabled` and `max_nodes`, with the total limit defaulting to 300. Derived exits are deduplicated by their probed public IP, comparing full IPv4 and IPv6 addresses. Duplicate addresses trigger reconnects; after the attempt limit, only the lowest-latency WARP route for the same IP is kept. Cloudflare may keep assigning shared exits, so reconnecting does not guarantee a new IP or twice as many exits. IPv6 availability also depends on the parent proxy's UDP support and Cloudflare network conditions.
+
+WARP exits warm up sequentially in the background, with at least 12 seconds between device registrations. Failed slots retry after one minute; duplicate-IP losers retry after five minutes. Tunnels and device credentials stay in memory and are recreated after restart. Each tunnel incarnation has a distinct node identity so old requests and probes cannot overwrite its replacement's state.
 
 ## 🚀 Quick Start
 
@@ -78,7 +119,7 @@ Docker Compose is the recommended quick-start path:
 # docker-compose.yml
 services:
   resin:
-    image: ghcr.io/resinat/resin:latest
+    image: ghcr.io/guji08233/resin:latest
     container_name: resin
     restart: unless-stopped
     environment:
@@ -94,7 +135,12 @@ services:
       - ./data/log:/var/log/resin
 ```
 
-Run `docker compose up -d` to start the service.
+Pushes to this repository's `master` branch automatically build and publish `latest`, `master`, and `sha-*` images at `ghcr.io/guji08233/resin`. To use the WARP and Mieru features in this branch, pull the new image and recreate the container:
+
+```bash
+docker compose pull
+docker compose up -d
+```
 
 Custom endpoint ports must also be reachable from outside the container. Docker cannot add published ports to an already-running container, so pre-publish the required port range in `ports` (for example `"2300-2399:2300-2399"`) or use host networking where appropriate.
 
@@ -308,7 +354,7 @@ If you are a developer and want AI to help modify an existing project for native
 <details>
 <summary><b>Option 1: Run prebuilt binary</b></summary>
 <br>
-Go to the project's <a href="https://github.com/Resinat/Resin/releases">Release</a> page and download the package for your OS/architecture. After extraction, run the single binary <code>resin</code>.
+Go to the project's <a href="https://github.com/GuJi08233/Resin/releases">Release</a> page and download the package for your OS/architecture. After extraction, run the single binary <code>resin</code>.
 
 ```bash
 RESIN_ADMIN_TOKEN=<admin-dashboard-password> \
@@ -341,7 +387,7 @@ Prerequisites: Go 1.25+ and Node.js installed.
 
 ```bash
 # 1. Clone Resin source
-git clone https://github.com/Resinat/Resin.git
+git clone https://github.com/GuJi08233/Resin.git
 
 # 2. Build WebUI
 cd Resin/webui
@@ -349,7 +395,7 @@ npm install && npm run build
 cd ..
 
 # 3. Build Resin core
-go build -tags "with_quic with_wireguard with_grpc with_utls" -o resin ./cmd/resin
+go build -tags "with_quic with_wireguard with_gvisor with_grpc with_utls" -o resin ./cmd/resin
 
 # 4. Run
 RESIN_ADMIN_TOKEN=<admin-dashboard-password> \

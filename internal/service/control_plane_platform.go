@@ -22,19 +22,19 @@ import (
 
 // PlatformResponse is the API response model for a platform.
 type PlatformResponse struct {
-	ID                               string                    `json:"id"`
-	Name                             string                    `json:"name"`
-	StickyTTL                        string                    `json:"sticky_ttl"`
-	RegexFilters                     []string                  `json:"regex_filters"`
-	RegionFilters                    []string                  `json:"region_filters"`
-	RoutableNodeCount                int                       `json:"routable_node_count"`
-	ReverseProxyMissAction           string                    `json:"reverse_proxy_miss_action"`
-	ReverseProxyEmptyAccountBehavior string                    `json:"reverse_proxy_empty_account_behavior"`
-	ReverseProxyFixedAccountHeader   string                    `json:"reverse_proxy_fixed_account_header"`
-	AllocationPolicy                 string                    `json:"allocation_policy"`
-	PassiveCircuitBreakerDisabled    bool                      `json:"passive_circuit_breaker_disabled"`
-	StatusCodeRules                  []StatusCodeRuleResponse  `json:"status_code_rules"`
-	UpdatedAt                        string                    `json:"updated_at"`
+	ID                               string                   `json:"id"`
+	Name                             string                   `json:"name"`
+	StickyTTL                        string                   `json:"sticky_ttl"`
+	RegexFilters                     []string                 `json:"regex_filters"`
+	RegionFilters                    []string                 `json:"region_filters"`
+	RoutableNodeCount                int                      `json:"routable_node_count"`
+	ReverseProxyMissAction           string                   `json:"reverse_proxy_miss_action"`
+	ReverseProxyEmptyAccountBehavior string                   `json:"reverse_proxy_empty_account_behavior"`
+	ReverseProxyFixedAccountHeader   string                   `json:"reverse_proxy_fixed_account_header"`
+	AllocationPolicy                 string                   `json:"allocation_policy"`
+	PassiveCircuitBreakerDisabled    bool                     `json:"passive_circuit_breaker_disabled"`
+	StatusCodeRules                  []StatusCodeRuleResponse `json:"status_code_rules"`
+	UpdatedAt                        string                   `json:"updated_at"`
 }
 
 // StatusCodeRuleResponse is the API representation of one status code rule.
@@ -400,15 +400,15 @@ func (s *ControlPlaneService) GetPlatform(id string) (*PlatformResponse, error) 
 
 // CreatePlatformRequest holds create platform parameters.
 type CreatePlatformRequest struct {
-	Name                             *string  `json:"name"`
-	StickyTTL                        *string  `json:"sticky_ttl"`
-	RegexFilters                     []string `json:"regex_filters"`
-	RegionFilters                    []string `json:"region_filters"`
-	ReverseProxyMissAction           *string  `json:"reverse_proxy_miss_action"`
-	ReverseProxyEmptyAccountBehavior *string  `json:"reverse_proxy_empty_account_behavior"`
-	ReverseProxyFixedAccountHeader   *string  `json:"reverse_proxy_fixed_account_header"`
-	AllocationPolicy                 *string  `json:"allocation_policy"`
-	PassiveCircuitBreakerDisabled    *bool    `json:"passive_circuit_breaker_disabled"`
+	Name                             *string                 `json:"name"`
+	StickyTTL                        *string                 `json:"sticky_ttl"`
+	RegexFilters                     []string                `json:"regex_filters"`
+	RegionFilters                    []string                `json:"region_filters"`
+	ReverseProxyMissAction           *string                 `json:"reverse_proxy_miss_action"`
+	ReverseProxyEmptyAccountBehavior *string                 `json:"reverse_proxy_empty_account_behavior"`
+	ReverseProxyFixedAccountHeader   *string                 `json:"reverse_proxy_fixed_account_header"`
+	AllocationPolicy                 *string                 `json:"allocation_policy"`
+	PassiveCircuitBreakerDisabled    *bool                   `json:"passive_circuit_breaker_disabled"`
 	StatusCodeRules                  []StatusCodeRuleRequest `json:"status_code_rules"`
 }
 
@@ -739,6 +739,8 @@ type PlatformSpecFilter struct {
 // NodeSummary is the API response for a node.
 type NodeSummary struct {
 	NodeHash                         string    `json:"node_hash"`
+	ParentHash                       string    `json:"parent_hash,omitempty"`
+	WarpFamily                       string    `json:"warp_family,omitempty"`
 	CreatedAt                        string    `json:"created_at"`
 	Enabled                          bool      `json:"enabled"`
 	DisplayTag                       string    `json:"display_tag,omitempty"`
@@ -777,6 +779,10 @@ func (s *ControlPlaneService) nodeEntryToSummary(h node.Hash, entry *node.NodeEn
 		HasOutbound:  entry.HasOutbound(),
 		LastError:    entry.GetLastError(),
 		FailureCount: int(entry.FailureCount.Load()),
+	}
+	if entry.ParentHash != nil {
+		ns.ParentHash = entry.ParentHash.Hex()
+		ns.WarpFamily = entry.WarpFamily
 	}
 
 	if s != nil && s.Pool != nil {
@@ -825,16 +831,15 @@ func (s *ControlPlaneService) nodeEntryToSummary(h node.Hash, entry *node.NodeEn
 		if sub == nil {
 			continue
 		}
-		managed, ok := sub.ManagedNodes().LoadNode(h)
+		name, tags, ok := s.nodeSubscriptionTags(entry, subID)
 		if !ok {
 			continue
 		}
-		tags := managed.Tags
 		for _, tag := range tags {
 			ns.Tags = append(ns.Tags, NodeTag{
 				SubscriptionID:          subID,
 				SubscriptionName:        sub.Name(),
-				Tag:                     sub.Name() + "/" + tag,
+				Tag:                     name + "/" + tag,
 				SubscriptionCreatedAtNs: sub.CreatedAtNs,
 			})
 		}

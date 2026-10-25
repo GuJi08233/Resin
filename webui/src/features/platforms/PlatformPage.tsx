@@ -35,6 +35,7 @@ import {
 } from "./formModel";
 import type { Platform } from "./types";
 import { StatusCodeRuleEditor } from "./StatusCodeRuleEditor";
+import { allowsWarpSubscription, setWarpSubscriptionAllowed } from "./warpSubscription";
 
 const ZERO_UUID = "00000000-0000-0000-0000-000000000000";
 const EMPTY_PLATFORMS: Platform[] = [];
@@ -355,6 +356,22 @@ export function PlatformPage() {
                   <div>{t("普通正则表达式表示满足其一，* 开头表示必须包含，! 开头表示排除。")}</div>
                   <div>{t("技巧：^<订阅名>/ 可筛选来自该订阅的节点。")}</div>
                 </div>
+              </div>
+
+              <div className="field-group">
+                <div className="subscription-switch-item">
+                  <label className="subscription-switch-label" htmlFor="create-allow-warp">
+                    {t("允许 WARP 订阅节点")}
+                  </label>
+                  <Switch
+                    id="create-allow-warp"
+                    checked={allowsWarpSubscription(createForm.watch("regex_filters_text"))}
+                    onChange={(event) => createForm.setValue("regex_filters_text",
+                      setWarpSubscriptionAllowed(createForm.getValues("regex_filters_text"), event.target.checked),
+                      { shouldDirty: true, shouldValidate: true })}
+                  />
+                </div>
+                <p className="muted">{t("关闭后，此平台排除 WARP 订阅的全部节点，其他平台不受影响。")}</p>
               </div>
 
               <div className="field-group">
