@@ -3,6 +3,7 @@
 package warp
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
@@ -118,6 +119,61 @@ func TestUserspaceEndpointEncryptedDataPlane(t *testing.T) {
 						t.Fatalf("decrypted payload = %q, want %q", response, message)
 					}
 				})
+			}
+			// Keep real encrypted packets flowing while both endpoints close.
+			// Stopping peers after detaching the gVisor stack used to race a
+			// receiver's Write against its cleared network dispatcher.
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			conn, err := client.DialContext(ctx, "tcp", M.Socksaddr{Addr: rightAddr.Addr(), Port: 12345})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+			trafficReady, trafficDone := make(chan struct{}), make(chan struct{})
+			go func() {
+				defer close(trafficDone)
+				payload := bytes.Repeat([]byte("encrypted-shutdown"), 4096)
+				response := make([]byte, len(payload))
+				first := true
+				for {
+					if _, err := conn.Write(payload); err != nil {
+						return
+					}
+					if _, err := io.ReadFull(conn, response); err != nil {
+						return
+					}
+					if first {
+						close(trafficReady)
+						first = false
+					}
+				}
+			}()
+			select {
+			case <-trafficReady:
+			case <-time.After(3 * time.Second):
+				t.Fatal("encrypted traffic did not start before shutdown")
+			}
+			closed := make(chan error, 2)
+			go func() { closed <- client.Close() }()
+			go func() { closed <- server.Close() }()
+			for range cap(closed) {
+				select {
+				case err := <-closed:
+					if err != nil {
+						t.Fatal(err)
+					}
+				case <-time.After(3 * time.Second):
+					left.Close()
+					right.Close()
+					t.Fatal("closing endpoints stalled while encrypted traffic was active")
+				}
+			}
+			select {
+			case <-trafficDone:
+			case <-time.After(3 * time.Second):
+				t.Fatal("active traffic outlived its closed WireGuard stack")
 			}
 		})
 	}

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/netip"
 	"strings"
+	"sync"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/log"
@@ -37,11 +38,27 @@ func (s *manualStack) Events() <-chan wgTun.Event { return s.events }
 type userspaceEndpoint struct {
 	wg.Device
 	wireguard *wgDevice.Device
+	bind      *ownedClientBind
+	cancel    context.CancelFunc
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func (e *userspaceEndpoint) Close() error {
-	e.wireguard.Close()
-	return nil
+	e.closeOnce.Do(func() {
+		e.cancel()
+		// A sender holds WireGuard's network read lock while writing through
+		// the parent. Close the owned bind before Down takes its write lock,
+		// so stalled parent reads and writes can finish.
+		bindErr := e.bind.Close()
+		// WireGuard.Close closes the TUN stack before stopping its peers.
+		// Stop them first: an in-flight decrypted packet must never reach a
+		// gVisor dispatcher that has already been detached during shutdown.
+		downErr := e.wireguard.Down()
+		e.wireguard.Close()
+		e.closeErr = errors.Join(bindErr, downErr)
+	})
+	return e.closeErr
 }
 
 func (e *userspaceEndpoint) diagnostics() tunnelDiagnostics {
@@ -129,6 +146,17 @@ func NewUserspaceEndpoint(options wg.EndpointOptions) (UserspaceEndpoint, error)
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	if err := ctx.Err(); err != nil {
+		cancel()
+		return nil, err
+	}
+	keepLifetime := false
+	defer func() {
+		if !keepLifetime {
+			cancel()
+		}
+	}()
 	ctx = pause.WithDefaultManager(ctx)
 	logger := options.Logger
 	if logger == nil {
@@ -155,7 +183,7 @@ func NewUserspaceEndpoint(options wg.EndpointOptions) (UserspaceEndpoint, error)
 		connectAddr = options.Peers[0].Endpoint.AddrPort()
 		copy(reserved[:], options.Peers[0].Reserved)
 	}
-	bind := wg.NewClientBind(ctx, logger, options.Dialer, len(options.Peers) == 1, connectAddr, reserved)
+	bind := newOwnedClientBind(ctx, options.Dialer, connectAddr, reserved)
 	if len(options.Peers) > 1 {
 		for _, peer := range options.Peers {
 			var peerReserved [3]byte
@@ -167,18 +195,36 @@ func NewUserspaceEndpoint(options wg.EndpointOptions) (UserspaceEndpoint, error)
 		Verbosef: func(format string, args ...any) { logger.Debug(fmt.Sprintf(format, args...)) },
 		Errorf:   func(format string, args ...any) { logger.Error(fmt.Sprintf(format, args...)) },
 	}, options.Workers)
+	endpoint := &userspaceEndpoint{Device: stack, wireguard: wireguard, bind: bind, cancel: cancel}
 	stack.SetDevice(wireguard)
 	if err := wireguard.IpcSet(configuration.String()); err != nil {
-		wireguard.Close()
+		endpoint.Close()
 		return nil, fmt.Errorf("configure WireGuard device: %w", err)
 	}
 	// Complete startup synchronously before publishing the backend. No TUN
 	// EventUp can race this call or a later shutdown.
-	if err := wireguard.Up(); err != nil {
-		wireguard.Close()
-		return nil, fmt.Errorf("start WireGuard device: %w", err)
+	// Up may synchronously send a keepalive through the parent's lazy proxy
+	// handshake. Cancelling its context alone cannot interrupt an established
+	// stream write, so close the bind as well while startup is in progress.
+	setupStopped := make(chan struct{})
+	stopSetupIO := context.AfterFunc(ctx, func() {
+		defer close(setupStopped)
+		bind.Close()
+	})
+	startErr := wireguard.Up()
+	if !stopSetupIO() {
+		<-setupStopped
 	}
-	return &userspaceEndpoint{Device: stack, wireguard: wireguard}, nil
+	if startErr != nil {
+		endpoint.Close()
+		return nil, fmt.Errorf("start WireGuard device: %w", startErr)
+	}
+	if err := ctx.Err(); err != nil {
+		endpoint.Close()
+		return nil, err
+	}
+	keepLifetime = true
+	return endpoint, nil
 }
 
 func keyHex(value string) (string, error) {

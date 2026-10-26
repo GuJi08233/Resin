@@ -41,6 +41,8 @@ type SubscriptionResponse struct {
 	LastError               string `json:"last_error,omitempty"`
 	Managed                 bool   `json:"managed,omitempty"`
 	MaxNodes                int    `json:"max_nodes,omitempty"`
+	MaintenanceStatus       string `json:"maintenance_status,omitempty"`
+	LastMaintenance         string `json:"last_maintenance,omitempty"`
 }
 
 // ensureWarpSubscription publishes the one runtime-only subscription. A read
@@ -131,6 +133,10 @@ func (s *ControlPlaneService) subToResponse(sub *subscription.Subscription) Subs
 		resp.Managed = true
 		resp.MaxNodes = cfg.WarpMaxNodes
 		resp.Enabled = cfg.WarpEnabled
+		resp.MaintenanceStatus = sub.MaintenanceStatus(cfg.WarpEnabled, time.Now())
+		if lm := sub.LastMaintenanceNs.Load(); lm > 0 {
+			resp.LastMaintenance = time.Unix(0, lm).UTC().Format(time.RFC3339Nano)
+		}
 	}
 	return resp
 }

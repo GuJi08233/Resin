@@ -17,7 +17,7 @@ func TestUserspaceEndpointReportsSafeRealHandshakeSnapshot(t *testing.T) {
 	defer packet.Close()
 	parent := &transportParent{packet: func(context.Context, M.Socksaddr) (net.PacketConn, error) { return packet, nil }}
 	reg := registration{id: "SECRET-DEVICE", privateKey: "eCtXsJZ27+4PbhDkHnB923tkUn2Gj59wZw5wFA75MnU=", peerKey: "Cr8hWlKvtDt7nrvf+f0brNQQzabAqrjfBvas9pmowjo="}
-	exit, err := newTunnel(parent, IPv4, reg, []netip.Prefix{netip.MustParsePrefix("172.16.0.2/32")}, netip.MustParseAddrPort("162.159.192.1:2408"))
+	exit, err := newTunnel(context.Background(), parent, IPv4, reg, []netip.Prefix{netip.MustParsePrefix("172.16.0.2/32")}, netip.MustParseAddrPort("162.159.192.1:2408"))
 	if err != nil {
 		t.Fatal(err)
 	}

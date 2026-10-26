@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Resinat/Resin/internal/config"
 	"github.com/Resinat/Resin/internal/node"
@@ -167,5 +168,42 @@ func TestWarpSubscriptionLegacyConfigUpdatesPreserveNodeView(t *testing.T) {
 	_ = json.Unmarshal(data, &decoded)
 	if decoded["managed"] != true || decoded["max_nodes"] != float64(600) {
 		t.Fatalf("managed metadata missing from JSON: %s", data)
+	}
+}
+
+func TestWarpSubscriptionReportsActualMaintenanceProgress(t *testing.T) {
+	h := newWarpSubscriptionHarness(t)
+	if _, err := h.cp.UpdateSubscription(subscription.WarpSubscriptionID, []byte(`{"enabled":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	sub := h.cp.SubMgr.Lookup(subscription.WarpSubscriptionID)
+	got, err := h.cp.GetSubscription(sub.ID)
+	if err != nil || got.MaintenanceStatus != "starting" || got.LastMaintenance != "" {
+		t.Fatalf("unstarted maintenance: %+v %v", got, err)
+	}
+	last := time.Now().Add(-time.Hour)
+	sub.RecordMaintenance(last)
+	sub.SetLastError("parent test family=ipv6: verification failed")
+	got, err = h.cp.GetSubscription(sub.ID)
+	if err != nil || got.MaintenanceStatus != "stalled" || got.LastMaintenance != last.UTC().Format(time.RFC3339Nano) ||
+		got.LastError == "" || sub.LastMaintenanceNs.Load() != last.UnixNano() {
+		t.Fatalf("API hid stalled maintenance, its error, or refreshed its heartbeat: %+v %v", got, err)
+	}
+	sub.RecordMaintenance(time.Now())
+	got, err = h.cp.GetSubscription(sub.ID)
+	if err != nil || got.MaintenanceStatus != "maintaining" || got.LastChecked != got.LastMaintenance {
+		t.Fatalf("recovered maintenance: %+v %v", got, err)
+	}
+	got, err = h.cp.UpdateSubscription(sub.ID, []byte(`{"enabled":false}`))
+	if err != nil || got.MaintenanceStatus != "disabled" {
+		t.Fatalf("disabled maintenance: %+v %v", got, err)
+	}
+	ordinary := subscription.NewSubscription("ordinary", "ordinary", "", true, false)
+	response := h.cp.subToResponse(ordinary)
+	data, _ := json.Marshal(response)
+	var fields map[string]any
+	_ = json.Unmarshal(data, &fields)
+	if _, ok := fields["maintenance_status"]; ok {
+		t.Fatalf("ordinary subscription acquired WARP maintenance fields: %s", data)
 	}
 }

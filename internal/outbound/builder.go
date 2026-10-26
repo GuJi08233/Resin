@@ -141,6 +141,9 @@ func (b *SingboxBuilder) Build(rawOptions json.RawMessage) (adapter.Outbound, er
 	logger := b.logFactory.NewLogger("outbound/" + outboundConfig.Type)
 	ob, handled, err := b.buildWireGuardCompat(outboundConfig, logger)
 	if !handled {
+		ob, handled, err = b.buildWebsocketCompat(outboundConfig, logger)
+	}
+	if !handled {
 		ob, err = b.registry.CreateOutbound(
 			b.ctx,
 			nil, // router — not needed for simple dialing

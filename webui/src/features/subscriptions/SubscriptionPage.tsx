@@ -119,6 +119,22 @@ function isWarpSubscription(subscription: Subscription): boolean {
   return subscription.source_type === "warp" || subscription.id === "system-warp";
 }
 
+function warpMaintenanceStatus(subscription: Subscription) {
+  if (!subscription.enabled || subscription.maintenance_status === "disabled") {
+    return { label: "已禁用", variant: "muted" } as const;
+  }
+  switch (subscription.maintenance_status) {
+    case "starting":
+      return { label: "正在启动", variant: "info" } as const;
+    case "maintaining":
+      return { label: "维护中", variant: "success" } as const;
+    case "stalled":
+      return { label: "维护停滞", variant: "danger" } as const;
+    default:
+      return { label: "状态未知", variant: "warning" } as const;
+  }
+}
+
 function parseEnabledFilter(value: EnabledFilter): boolean | undefined {
   if (value === "enabled") {
     return true;
@@ -588,7 +604,20 @@ export function SubscriptionPage() {
         cell: (info) => {
           const s = info.row.original;
           if (isWarpSubscription(s)) {
-            return <Badge variant={s.enabled ? "success" : "muted"}>{s.enabled ? t("自动维护") : t("已禁用")}</Badge>;
+            const status = warpMaintenanceStatus(s);
+            return (
+              <div className="subscriptions-status-cell">
+                <Badge
+                  variant={status.variant}
+                  title={s.maintenance_status === "stalled" ? t("自动维护长时间未响应，请检查服务状态。") : undefined}
+                >{t(status.label)}</Badge>
+                {s.enabled && s.last_error ? (
+                  <Badge variant="warning" title={t("最近错误：{{message}}", { message: s.last_error })}>
+                    {t("最近尝试失败")}
+                  </Badge>
+                ) : null}
+              </div>
+            );
           }
           return (
             <div className="subscriptions-status-cell">
@@ -837,14 +866,20 @@ export function SubscriptionPage() {
                     <p>{formatDateTime(selectedSubscription.created_at)}</p>
                   </div>
                   <div>
-                    <span>{t("上次检查")}</span>
-                    <p>{formatDateTime(selectedSubscription.last_checked || "")}</p>
+                    <span>{t(isWarpSubscription(selectedSubscription) ? "最近维护" : "上次检查")}</span>
+                    <p>{formatDateTime((isWarpSubscription(selectedSubscription)
+                      ? selectedSubscription.last_maintenance
+                      : selectedSubscription.last_checked) || "")}</p>
                   </div>
                   <div>
                     <span>{t("上次更新")}</span>
                     <p>{formatDateTime(selectedSubscription.last_updated || "")}</p>
                   </div>
                 </div>
+
+                {isWarpSubscription(selectedSubscription) && selectedSubscription.maintenance_status === "stalled" ? (
+                  <div className="callout callout-error">{t("自动维护长时间未响应，请检查服务状态。")}</div>
+                ) : null}
 
                 {selectedSubscription.last_error ? (
                   <div className="callout callout-error">{t("最近错误：{{message}}", { message: selectedSubscription.last_error })}</div>

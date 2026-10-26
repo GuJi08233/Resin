@@ -33,7 +33,7 @@ type Factory struct {
 	registrar *registrar
 	// Internal seams keep endpoint failure/cancellation tests independent of
 	// device registration and public network access.
-	openTunnel func(adapter.Outbound, Family, registration, []netip.Prefix, netip.AddrPort) (*Exit, error)
+	openTunnel func(context.Context, adapter.Outbound, Family, registration, []netip.Prefix, netip.AddrPort) (*Exit, error)
 	verifyExit func(context.Context, *Exit) error
 }
 
@@ -108,7 +108,7 @@ func (f *Factory) createRegistered(ctx context.Context, parent adapter.Outbound,
 			break
 		}
 		attempts++
-		exit, err := open(parent, family, reg, addresses, endpoint)
+		exit, err := open(ctx, parent, family, reg, addresses, endpoint)
 		if err != nil {
 			recordFailure(endpoint, "tunnel_create", err)
 			continue
@@ -116,8 +116,11 @@ func (f *Factory) createRegistered(ctx context.Context, parent adapter.Outbound,
 		probeCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 		err = verify(probeCtx, exit)
 		cancel()
-		if err == nil {
+		if err == nil && ctx.Err() == nil {
 			return exit, nil
+		}
+		if err == nil {
+			err = ctx.Err()
 		}
 		recordFailure(endpoint, "verify", err)
 		exit.Close()
@@ -183,14 +186,26 @@ type tunnelEndpoint interface {
 	Close() error
 }
 
-func newTunnel(parent adapter.Outbound, family Family, reg registration, addresses []netip.Prefix, endpoint netip.AddrPort) (*Exit, error) {
+func newTunnel(ctx context.Context, parent adapter.Outbound, family Family, reg registration, addresses []netip.Prefix, endpoint netip.AddrPort) (*Exit, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	lifetime, cancel := context.WithCancel(context.Background())
 	lifetime = pause.WithDefaultManager(lifetime)
+	// Setup belongs to the caller's attempt. A published tunnel has its own
+	// lifetime, since the manager cancels the attempt after successful creation.
+	stopSetupCancellation := context.AfterFunc(ctx, cancel)
 	outer := new(outerDiagnostics)
 	inner, err := createEndpoint(lifetime, &diagnosticParentOutbound{Outbound: parent, state: outer}, reg, addresses, endpoint)
+	setupDetached := stopSetupCancellation()
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("create WARP tunnel: %w", err)
+	}
+	if !setupDetached || ctx.Err() != nil {
+		cancel()
+		inner.Close()
+		return nil, fmt.Errorf("create WARP tunnel: %w", ctx.Err())
 	}
 	e := &Exit{Adapter: outbound.NewAdapter("warp", "warp-"+reg.id+"-"+string(family), []string{"tcp", "udp"}, nil), family: family, endpoint: inner, cancel: cancel, outer: outer}
 	e.resolver = &net.Resolver{PreferGo: true, StrictErrors: true, Dial: func(ctx context.Context, network, address string) (net.Conn, error) {

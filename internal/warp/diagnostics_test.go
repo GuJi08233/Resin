@@ -112,7 +112,7 @@ func TestFactoryPreservesEndpointFailureWhenOverallContextEnds(t *testing.T) {
 		endpoints: []netip.AddrPort{first, netip.MustParseAddrPort("162.159.193.1:2408")}}
 	opens := 0
 	factory := &Factory{
-		openTunnel: func(adapter.Outbound, Family, registration, []netip.Prefix, netip.AddrPort) (*Exit, error) {
+		openTunnel: func(context.Context, adapter.Outbound, Family, registration, []netip.Prefix, netip.AddrPort) (*Exit, error) {
 			opens++
 			return &Exit{endpoint: endpoint, cancel: func() {}}, nil
 		},
@@ -144,7 +144,7 @@ func TestFactoryBoundsAggregatedEndpointFailures(t *testing.T) {
 	for index := 1; index <= 20; index++ {
 		reg.endpoints = append(reg.endpoints, netip.MustParseAddrPort(fmt.Sprintf("162.159.192.%d:2408", index)))
 	}
-	factory := &Factory{openTunnel: func(_ adapter.Outbound, _ Family, _ registration, _ []netip.Prefix, _ netip.AddrPort) (*Exit, error) {
+	factory := &Factory{openTunnel: func(_ context.Context, _ adapter.Outbound, _ Family, _ registration, _ []netip.Prefix, _ netip.AddrPort) (*Exit, error) {
 		return nil, errors.New("mock endpoint creation failure")
 	}}
 	_, err := factory.createRegistered(context.Background(), nil, IPv4, reg)
@@ -159,6 +159,40 @@ func TestFactoryBoundsAggregatedEndpointFailures(t *testing.T) {
 	}
 	if strings.Count(message, "endpoint=") != 2 {
 		t.Fatalf("error repeated every endpoint instead of bounded first/last details: %s", message)
+	}
+}
+
+func TestFactoryCancelsTunnelSetup(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan struct{})
+	reg := registration{
+		addresses: []netip.Prefix{netip.MustParsePrefix("172.16.0.2/32")},
+		endpoints: []netip.AddrPort{netip.MustParseAddrPort("162.159.192.1:2408")},
+	}
+	factory := &Factory{openTunnel: func(setupCtx context.Context, _ adapter.Outbound, _ Family, _ registration, _ []netip.Prefix, _ netip.AddrPort) (*Exit, error) {
+		close(started)
+		<-setupCtx.Done()
+		return nil, setupCtx.Err()
+	}}
+	done := make(chan error, 1)
+	go func() {
+		_, err := factory.createRegistered(ctx, nil, IPv4, reg)
+		done <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("factory never entered tunnel setup")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("setup lost attempt cancellation: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("attempt cancellation did not interrupt tunnel setup")
 	}
 }
 

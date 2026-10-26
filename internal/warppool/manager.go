@@ -66,6 +66,11 @@ type parentFailure struct {
 	retryAt     time.Time
 }
 
+type parentFamily struct {
+	parent node.Hash
+	family warp.Family
+}
+
 type settings struct {
 	enabled bool
 	stack   string
@@ -80,7 +85,7 @@ type Manager struct {
 	opts           Options
 	active         map[slot]managedExit
 	nextTry        map[slot]time.Time
-	parentFailures map[node.Hash]parentFailure
+	parentFailures map[parentFamily]parentFailure
 	lastAttempt    slot
 	hasLastAttempt bool
 	mu             sync.Mutex
@@ -104,7 +109,7 @@ func NewManager(opts Options) *Manager {
 			return Candidate{Outbound: exit, IP: exit.EgressIP, Latency: exit.Latency}, nil
 		}
 	}
-	return &Manager{opts: opts, active: make(map[slot]managedExit), nextTry: make(map[slot]time.Time), parentFailures: make(map[node.Hash]parentFailure)}
+	return &Manager{opts: opts, active: make(map[slot]managedExit), nextTry: make(map[slot]time.Time), parentFailures: make(map[parentFamily]parentFailure)}
 }
 
 func (m *Manager) currentSettings() settings {
@@ -168,6 +173,24 @@ func (m *Manager) remove(key slot) {
 	if exit, ok := m.active[key]; ok {
 		m.opts.Pool.RemoveDerivedNode(exit.entry.Hash)
 		delete(m.active, key)
+		if sub := m.managedSubscription(); sub != nil {
+			now := time.Now()
+			sub.LastUpdatedNs.Store(now.UnixNano())
+			sub.RecordMaintenance(now)
+		}
+	}
+}
+
+func (m *Manager) managedSubscription() *subscription.Subscription {
+	if m.opts.Subscriptions != nil {
+		return m.opts.Subscriptions.Lookup(subscription.WarpSubscriptionID)
+	}
+	return nil
+}
+
+func (m *Manager) recordProgress() {
+	if sub := m.managedSubscription(); sub != nil {
+		sub.RecordMaintenance(time.Now())
 	}
 }
 
@@ -202,6 +225,8 @@ func (m *Manager) latency(entry *node.NodeEntry) time.Duration {
 }
 
 func (m *Manager) reconcile(ctx context.Context) {
+	m.recordProgress()
+	defer m.recordProgress()
 	cfg := m.currentSettings()
 	if !cfg.enabled {
 		m.clear()
@@ -272,26 +297,19 @@ func (m *Manager) reconcile(ctx context.Context) {
 		return true
 	})
 	slices.SortFunc(parents, func(a, b *node.NodeEntry) int { return slices.Compare(a.Hash[:], b.Hash[:]) })
-	families := 1
-	if cfg.stack == "dual" {
-		families = 2
-	}
-	// The subscription limit controls expansion, including when there is only
-	// one parent. The per-family setting is an initial candidate allocation,
-	// rather than a hidden ceiling that prevents the subscription from growing.
-	rounds := cfg.count
-	if len(parents) > 0 {
-		perRound := len(parents) * families
-		rounds = max(rounds, (cfg.limit+perRound-1)/perRound)
-	}
+	// Every working parent/family may fill the pool if the other lanes fail or
+	// produce duplicate IPs. A shared allocation based on all eligible parents
+	// would strand capacity on those unsuccessful lanes. The subscription cap
+	// also bounds each lane's candidate indices; retries never grow slot space.
+	rounds := cfg.limit
 	for key, retryAt := range m.nextTry {
 		if _, exists := m.opts.Pool.GetEntry(key.parent); !exists || key.index >= rounds || !cfg.accepts(key.family) || time.Now().After(retryAt) {
 			delete(m.nextTry, key)
 		}
 	}
-	for hash, failure := range m.parentFailures {
-		if _, exists := m.opts.Pool.GetEntry(hash); !exists || (!failure.retryAt.IsZero() && !time.Now().Before(failure.retryAt)) {
-			delete(m.parentFailures, hash)
+	for key, failure := range m.parentFailures {
+		if _, exists := m.opts.Pool.GetEntry(key.parent); !exists || !cfg.accepts(key.family) || (!failure.retryAt.IsZero() && !time.Now().Before(failure.retryAt)) {
+			delete(m.parentFailures, key)
 		}
 	}
 	// Keep a persistent cursor. A slow failed candidate can outlive a previous
@@ -306,7 +324,7 @@ findCandidate:
 				if !cfg.accepts(family) {
 					continue
 				}
-				if time.Now().Before(m.parentFailures[parent.Hash].retryAt) {
+				if time.Now().Before(m.parentFailures[parentFamily{parent.Hash, family}].retryAt) {
 					continue
 				}
 				key := slot{parent.Hash, family, index}
@@ -396,13 +414,9 @@ func (m *Manager) duplicate(ip netip.Addr) (slot, bool, bool) {
 }
 
 func (m *Manager) create(ctx context.Context, cfg settings, key slot, parent *node.NodeEntry) {
-	var managedSub *subscription.Subscription
-	if m.opts.Subscriptions != nil {
-		managedSub = m.opts.Subscriptions.Lookup(subscription.WarpSubscriptionID)
-		if managedSub != nil {
-			managedSub.LastCheckedNs.Store(time.Now().UnixNano())
-		}
-	}
+	managedSub := m.managedSubscription()
+	m.recordProgress()
+	failureKey := parentFamily{key.parent, key.family}
 	via := parent.Outbound.Load()
 	if via == nil {
 		return
@@ -415,9 +429,7 @@ func (m *Manager) create(ctx context.Context, cfg settings, key slot, parent *no
 	var best Candidate
 	defer func() { closeCandidate(best) }()
 	for attempt := 0; attempt < cfg.tries; attempt++ {
-		if managedSub != nil {
-			managedSub.LastCheckedNs.Store(time.Now().UnixNano())
-		}
+		m.recordProgress()
 		attemptCtx, cancel := m.attemptContext(ctx, cfg)
 		candidate, err := m.opts.Create(attemptCtx, *via, key.family)
 		cancel()
@@ -426,21 +438,21 @@ func (m *Manager) create(ctx context.Context, cfg settings, key slot, parent *no
 			if ctx.Err() != nil || m.currentSettings() != cfg {
 				return
 			}
-			failure := m.parentFailures[parent.Hash]
+			failure := m.parentFailures[failureKey]
 			failure.consecutive++
 			message := fmt.Sprintf("%s failures=%d/%d: %v", parentContext, failure.consecutive, parentFailureLimit, err)
 			if failure.consecutive >= parentFailureLimit {
 				failure.retryAt = time.Now().Add(parentFailureCooldown)
-				message += fmt.Sprintf("; parent paused until %s", failure.retryAt.Format(time.RFC3339))
+				message += fmt.Sprintf("; parent family paused until %s", failure.retryAt.Format(time.RFC3339))
 			}
-			m.parentFailures[parent.Hash] = failure
+			m.parentFailures[failureKey] = failure
 			if managedSub != nil {
 				managedSub.SetLastError(message)
 			}
 			m.opts.Logf("WARP %s", message)
 			break // reconnect budget is for duplicate IPs, not broken transports
 		}
-		delete(m.parentFailures, parent.Hash)
+		delete(m.parentFailures, failureKey)
 		candidate.IP = candidate.IP.Unmap()
 		if candidate.Outbound == nil || !candidate.IP.IsGlobalUnicast() ||
 			(key.family == warp.IPv4 && !candidate.IP.Is4()) ||

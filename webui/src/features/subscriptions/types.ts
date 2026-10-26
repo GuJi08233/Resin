@@ -17,6 +17,8 @@ export type Subscription = {
   last_checked?: string;
   last_updated?: string;
   last_error?: string;
+  maintenance_status?: "starting" | "maintaining" | "stalled" | "disabled";
+  last_maintenance?: string;
 };
 
 export type PageResponse<T> = {

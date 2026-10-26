@@ -138,7 +138,10 @@ type Subscription struct {
 	// from the scheduler's due-check loop.
 	LastCheckedNs atomic.Int64
 	LastUpdatedNs atomic.Int64
-	LastError     atomic.Pointer[string]
+	// LastMaintenanceNs is progress of the managed WARP worker, including idle
+	// reconciliation. It is never refreshed by API reads or an unrelated timer.
+	LastMaintenanceNs atomic.Int64
+	LastError         atomic.Pointer[string]
 
 	// Scheduler sequencing for stale-attempt guards.
 	attemptSeq     atomic.Int64

@@ -164,10 +164,10 @@ func TestManagerBadParentsDoNotBlockAWorkingParent(t *testing.T) {
 	}
 }
 
-func TestManagerRepeatedTransportFailuresPauseParentAcrossAllSlots(t *testing.T) {
+func TestManagerRepeatedTransportFailuresPauseParentFamilyAcrossAllSlots(t *testing.T) {
 	f := newPoolFixture(t)
 	f.configure(func(cfg *config.RuntimeConfig) {
-		cfg.WarpStack, cfg.WarpExitsPerFamily, cfg.WarpMaxNodes = "dual", 4, 8
+		cfg.WarpStack, cfg.WarpExitsPerFamily, cfg.WarpMaxNodes = "ipv4", 4, 8
 		cfg.WarpReconnectAttempts = 10
 	})
 	calls := 0
@@ -182,12 +182,13 @@ func TestManagerRepeatedTransportFailuresPauseParentAcrossAllSlots(t *testing.T)
 			t.Fatalf("transport error retried within one slot: calls=%d, slots=%d", calls, index+1)
 		}
 	}
-	failure := manager.parentFailures[f.parent.Hash]
+	failureKey := parentFamily{f.parent.Hash, warp.IPv4}
+	failure := manager.parentFailures[failureKey]
 	if failure.consecutive != 3 || time.Until(failure.retryAt) < 29*time.Minute || time.Until(failure.retryAt) > 30*time.Minute {
 		t.Fatalf("three failures did not pause the parent for 30 minutes: %+v", failure)
 	}
 	message := f.subs.Lookup(subscription.WarpSubscriptionID).GetLastError()
-	if !strings.Contains(message, "failures=3/3") || !strings.Contains(message, "parent paused until ") {
+	if !strings.Contains(message, "failures=3/3") || !strings.Contains(message, "parent family paused until ") {
 		t.Fatalf("pause was not reported in the managed subscription: %q", message)
 	}
 	for index := 0; index < 12; index++ {
@@ -199,13 +200,13 @@ func TestManagerRepeatedTransportFailuresPauseParentAcrossAllSlots(t *testing.T)
 	}
 	// Advance only the parent's retry deadline; no network or wall-clock wait.
 	failure.retryAt = time.Now().Add(-time.Second)
-	manager.parentFailures[f.parent.Hash] = failure
+	manager.parentFailures[failureKey] = failure
 	expireSchedulingSlotCooldowns(manager)
 	manager.reconcile(context.Background())
 	if calls != 4 {
 		t.Fatalf("expired parent pause did not allow retry: got %d calls", calls)
 	}
-	if restarted := manager.parentFailures[f.parent.Hash]; restarted.consecutive != 1 || !restarted.retryAt.IsZero() {
+	if restarted := manager.parentFailures[failureKey]; restarted.consecutive != 1 || !restarted.retryAt.IsZero() {
 		t.Fatalf("retry after pause retained exhausted failure streak: %+v", restarted)
 	}
 	if f.subs.Lookup(subscription.WarpSubscriptionID).ManagedNodes().Size() != 0 || f.pool.Size() != 1 {
@@ -224,7 +225,7 @@ func TestManagerDisableResetsParentPauseAndSchedulingState(t *testing.T) {
 		expireSchedulingSlotCooldowns(manager)
 		manager.reconcile(context.Background())
 	}
-	if calls != 3 || manager.parentFailures[f.parent.Hash].retryAt.IsZero() {
+	if calls != 3 || manager.parentFailures[parentFamily{f.parent.Hash, warp.IPv4}].retryAt.IsZero() {
 		t.Fatal("test did not establish the parent pause")
 	}
 	f.configure(func(cfg *config.RuntimeConfig) { cfg.WarpEnabled = false })
@@ -237,7 +238,7 @@ func TestManagerDisableResetsParentPauseAndSchedulingState(t *testing.T) {
 	}
 	f.configure(func(cfg *config.RuntimeConfig) { cfg.WarpEnabled = true })
 	manager.reconcile(context.Background())
-	if calls != 4 || manager.parentFailures[f.parent.Hash].consecutive != 1 {
+	if calls != 4 || manager.parentFailures[parentFamily{f.parent.Hash, warp.IPv4}].consecutive != 1 {
 		t.Fatal("re-enabling WARP did not immediately retry the previously paused parent with a fresh streak")
 	}
 }
