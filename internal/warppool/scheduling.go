@@ -149,23 +149,23 @@ func (m *Manager) pickCandidate(cfg settings, now time.Time) (slot, *node.NodeEn
 			}
 			return 1
 		}
-		if a.key.index != b.key.index {
-			return a.key.index - b.key.index
-		}
 		if a.familyRank != b.familyRank {
 			return a.familyRank - b.familyRank
+		}
+		// After initial parent coverage, rotate whole lanes. Repeated first-slot
+		// failures and verified duplicates must yield to productive expansion.
+		// History breaks initial ties without overriding ongoing fairness.
+		if a.lastTried != b.lastTried {
+			if a.lastTried < b.lastTried {
+				return -1
+			}
+			return 1
 		}
 		if a.historyTier != b.historyTier {
 			return a.historyTier - b.historyTier
 		}
 		if a.latency != b.latency {
 			if a.latency < b.latency {
-				return -1
-			}
-			return 1
-		}
-		if a.lastTried != b.lastTried {
-			if a.lastTried < b.lastTried {
 				return -1
 			}
 			return 1

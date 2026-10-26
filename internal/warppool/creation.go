@@ -20,6 +20,7 @@ type creationJob struct {
 	ctx           context.Context
 	cancel        func()
 	previousVisit bool
+	previousTry   uint64
 }
 
 type creationResult struct {
@@ -34,7 +35,7 @@ func (m *Manager) dispatch(ctx context.Context, cfg settings, key slot, parent *
 		return
 	}
 	attemptCtx, cancel := m.attemptContext(ctx, cfg)
-	job := &creationJob{key: key, parent: parent, via: via, cfg: cfg, ctx: attemptCtx, cancel: cancel, previousVisit: m.visited[key.parent]}
+	job := &creationJob{key: key, parent: parent, via: via, cfg: cfg, ctx: attemptCtx, cancel: cancel, previousVisit: m.visited[key.parent], previousTry: m.lastTried[parentFamily{key.parent, key.family}]}
 	m.inflight[key] = job
 	m.visited[key.parent] = true
 	m.lastAttempt, m.hasLastAttempt = key, true
@@ -130,6 +131,11 @@ func (m *Manager) completeAttempt(ctx context.Context, result creationResult) {
 			m.nextTry[key] = m.rateRetryAt
 			if !job.previousVisit {
 				delete(m.visited, key.parent)
+			}
+			if job.previousTry == 0 {
+				delete(m.lastTried, failureKey)
+			} else {
+				m.lastTried[failureKey] = job.previousTry
 			}
 			message := fmt.Sprintf("Cloudflare registration paused until %s: %v", m.rateRetryAt.Format(time.RFC3339), result.err)
 			if sub := m.managedSubscription(); sub != nil {
