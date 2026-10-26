@@ -123,21 +123,22 @@ func (h *parentHistory) load(now time.Time) {
 }
 
 func (h *parentHistory) Record(parent node.Hash, family warp.Family, latency time.Duration, now time.Time) {
-	if h == nil || parent.IsZero() || !validHistoryFamily(family) || latency <= 0 {
+	clock := time.Now()
+	if h == nil || parent.IsZero() || !validHistoryFamily(family) || latency <= 0 || !historySuccessFresh(now.UnixNano(), clock) {
 		return
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.pruneLocked(now)
 	key := parentHistoryKey{parent, family}
 	success := parentHistorySuccess{latency, now.UnixNano()}
-	if previous, exists := h.entries[key]; exists && previous == success {
+	if previous, exists := h.entries[key]; exists && previous.lastSuccess >= success.lastSuccess {
 		return
 	}
+	h.pruneLocked(clock)
 	h.entries[key] = success
 	h.dirty = true
 	h.generation++
-	h.pruneLocked(now)
+	h.pruneLocked(clock)
 }
 
 // Preference ranks a verified family first (0), another verified family on the

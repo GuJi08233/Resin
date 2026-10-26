@@ -292,6 +292,14 @@ func (m *Manager) reconcile(ctx context.Context) {
 			!exit.entry.IsHealthy() || !cfg.accepts(key.family) {
 			m.remove(key)
 			delete(m.nextTry, key)
+			continue
+		}
+		// Use successful egress-probe evidence, not this loop's heartbeat, so
+		// a long-running full pool keeps useful restart hints fresh honestly.
+		checked := exit.entry.LastEgressUpdate.Load()
+		latency := m.latency(exit.entry)
+		if checked > 0 && latency > 0 && latency != time.Duration(1<<63-1) {
+			m.history.Record(key.parent, key.family, latency, time.Unix(0, checked))
 		}
 	}
 	// Regular egress probes can discover that a previously unique exit changed.
