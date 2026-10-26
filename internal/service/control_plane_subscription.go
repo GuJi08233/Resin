@@ -31,6 +31,8 @@ type SubscriptionResponse struct {
 	UpdateInterval          string `json:"update_interval"`
 	NodeCount               int    `json:"node_count"`
 	HealthyNodeCount        int    `json:"healthy_node_count"`
+	IPv4NodeCount           int    `json:"ipv4_node_count,omitempty"`
+	IPv6NodeCount           int    `json:"ipv6_node_count,omitempty"`
 	Ephemeral               bool   `json:"ephemeral"`
 	IncrementalAliveNodes   bool   `json:"incremental_alive_nodes"`
 	EphemeralNodeEvictDelay string `json:"ephemeral_node_evict_delay"`
@@ -86,6 +88,8 @@ func (s *ControlPlaneService) syncWarpSubscriptionLocked() *subscription.Subscri
 func (s *ControlPlaneService) subToResponse(sub *subscription.Subscription) SubscriptionResponse {
 	nodeCount := 0
 	healthyNodeCount := 0
+	ipv4NodeCount, ipv6NodeCount := 0, 0
+	isWarp := sub.ID == subscription.WarpSubscriptionID
 	var isHealthyAndEnabled func(*node.NodeEntry) bool
 	if sub.Enabled() && s != nil && s.Pool != nil {
 		isHealthyAndEnabled = s.Pool.MakeHealthyAndEnabledEvaluator()
@@ -96,10 +100,20 @@ func (s *ControlPlaneService) subToResponse(sub *subscription.Subscription) Subs
 				return true
 			}
 			nodeCount++
-			if isHealthyAndEnabled != nil {
+			if s != nil && s.Pool != nil && (isWarp || isHealthyAndEnabled != nil) {
 				entry, ok := s.Pool.GetEntry(h)
-				if ok && isHealthyAndEnabled(entry) {
-					healthyNodeCount++
+				if ok {
+					if isWarp {
+						switch entry.WarpFamily {
+						case "ipv4":
+							ipv4NodeCount++
+						case "ipv6":
+							ipv6NodeCount++
+						}
+					}
+					if isHealthyAndEnabled != nil && isHealthyAndEnabled(entry) {
+						healthyNodeCount++
+					}
 				}
 			}
 			return true
@@ -128,8 +142,9 @@ func (s *ControlPlaneService) subToResponse(sub *subscription.Subscription) Subs
 		resp.LastUpdated = time.Unix(0, lu).UTC().Format(time.RFC3339Nano)
 	}
 	resp.LastError = sub.GetLastError()
-	if sub.ID == subscription.WarpSubscriptionID {
+	if isWarp {
 		cfg := s.runtimeConfigOrDefault()
+		resp.IPv4NodeCount, resp.IPv6NodeCount = ipv4NodeCount, ipv6NodeCount
 		resp.Managed = true
 		resp.MaxNodes = cfg.WarpMaxNodes
 		resp.Enabled = cfg.WarpEnabled

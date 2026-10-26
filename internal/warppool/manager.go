@@ -3,8 +3,6 @@ package warppool
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"io"
 	"log"
 	"net/netip"
@@ -42,6 +40,8 @@ type Options struct {
 	MaxLatencyEntries int
 	Create            CreateFunc // nil uses the real WARP factory
 	Logf              func(string, ...any)
+	Concurrency       int // bounded simultaneous creation attempts; one gives synchronous reconciliation
+	HistoryPath       string
 }
 
 type slot struct {
@@ -93,12 +93,27 @@ type Manager struct {
 	wg             sync.WaitGroup
 	started        bool
 	stopped        bool
+	history        *parentHistory
+	inflight       map[slot]*creationJob
+	results        chan creationResult
+	jobs           sync.WaitGroup
+	visited        map[node.Hash]bool
+	duplicateTries map[parentFamily]int
+	lastTried      map[parentFamily]uint64
+	sequence       uint64
+	lastFamily     warp.Family
+	familyStreak   int
+	rateRetryAt    time.Time
 }
 
 func NewManager(opts Options) *Manager {
 	if opts.Logf == nil {
 		opts.Logf = log.Printf
 	}
+	if opts.Concurrency < 1 {
+		opts.Concurrency = 4
+	}
+	opts.Concurrency = min(opts.Concurrency, 8)
 	if opts.Create == nil {
 		factory := warp.NewFactory()
 		opts.Create = func(ctx context.Context, parent adapter.Outbound, family warp.Family) (Candidate, error) {
@@ -109,7 +124,12 @@ func NewManager(opts Options) *Manager {
 			return Candidate{Outbound: exit, IP: exit.EgressIP, Latency: exit.Latency}, nil
 		}
 	}
-	return &Manager{opts: opts, active: make(map[slot]managedExit), nextTry: make(map[slot]time.Time), parentFailures: make(map[parentFamily]parentFailure)}
+	return &Manager{
+		opts: opts, active: make(map[slot]managedExit), nextTry: make(map[slot]time.Time),
+		parentFailures: make(map[parentFamily]parentFailure), history: newParentHistory(opts.HistoryPath, opts.Logf),
+		inflight: make(map[slot]*creationJob), results: make(chan creationResult, opts.Concurrency),
+		visited: make(map[node.Hash]bool), duplicateTries: make(map[parentFamily]int), lastTried: make(map[parentFamily]uint64),
+	}
 }
 
 func (m *Manager) currentSettings() settings {
@@ -139,7 +159,7 @@ func (m *Manager) Start() {
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
-		defer m.clear()
+		defer m.shutdown()
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 		for {
@@ -148,6 +168,8 @@ func (m *Manager) Start() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+			case result := <-m.results:
+				m.completeAttempt(ctx, result)
 			}
 		}
 	}()
@@ -161,6 +183,9 @@ func (m *Manager) Stop() {
 	}
 	m.mu.Unlock()
 	m.wg.Wait()
+	if !m.started {
+		m.shutdown()
+	}
 }
 
 func closeCandidate(candidate Candidate) {
@@ -195,12 +220,21 @@ func (m *Manager) recordProgress() {
 }
 
 func (m *Manager) clear() {
+	for _, job := range m.inflight {
+		job.cancel()
+	}
 	for key := range m.active {
 		m.remove(key)
 	}
 	clear(m.nextTry)
 	clear(m.parentFailures)
 	m.hasLastAttempt = false
+	clear(m.visited)
+	clear(m.duplicateTries)
+	clear(m.lastTried)
+	m.lastFamily = ""
+	m.familyStreak = 0
+	m.history.Flush()
 }
 
 func (s settings) accepts(family warp.Family) bool {
@@ -225,9 +259,23 @@ func (m *Manager) latency(entry *node.NodeEntry) time.Duration {
 }
 
 func (m *Manager) reconcile(ctx context.Context) {
-	m.recordProgress()
-	defer m.recordProgress()
+	m.drainResults(ctx)
+	if len(m.inflight) == 0 {
+		m.recordProgress()
+	}
+	defer func() {
+		if len(m.inflight) == 0 {
+			m.recordProgress()
+		}
+		m.history.Flush()
+	}()
 	cfg := m.currentSettings()
+	for _, job := range m.inflight {
+		parent, exists := m.opts.Pool.GetEntry(job.key.parent)
+		if cfg != job.cfg || !exists || parent != job.parent || !m.eligible(parent) || parent.Outbound.Load() != job.via {
+			job.cancel()
+		}
+	}
 	if !cfg.enabled {
 		m.clear()
 		return
@@ -286,86 +334,20 @@ func (m *Manager) reconcile(ctx context.Context) {
 		}
 		m.remove(slowest)
 	}
-	if ctx.Err() != nil || len(m.active) >= cfg.limit {
+	if ctx.Err() != nil || time.Now().Before(m.rateRetryAt) {
 		return
 	}
-	parents := make([]*node.NodeEntry, 0)
-	m.opts.Pool.RangeNodes(func(_ node.Hash, entry *node.NodeEntry) bool {
-		if m.eligible(entry) {
-			parents = append(parents, entry)
+	m.cleanScheduling(cfg, time.Now())
+	for len(m.inflight) < m.opts.Concurrency && m.hasCapacity(cfg) {
+		key, parent, found := m.pickCandidate(cfg, time.Now())
+		if !found {
+			break
 		}
-		return true
-	})
-	slices.SortFunc(parents, func(a, b *node.NodeEntry) int { return slices.Compare(a.Hash[:], b.Hash[:]) })
-	// Every working parent/family may fill the pool if the other lanes fail or
-	// produce duplicate IPs. A shared allocation based on all eligible parents
-	// would strand capacity on those unsuccessful lanes. The subscription cap
-	// also bounds each lane's candidate indices; retries never grow slot space.
-	rounds := cfg.limit
-	for key, retryAt := range m.nextTry {
-		if _, exists := m.opts.Pool.GetEntry(key.parent); !exists || key.index >= rounds || !cfg.accepts(key.family) || time.Now().After(retryAt) {
-			delete(m.nextTry, key)
+		m.dispatch(ctx, cfg, key, parent)
+		if m.opts.Concurrency == 1 {
+			break
 		}
 	}
-	for key, failure := range m.parentFailures {
-		if _, exists := m.opts.Pool.GetEntry(key.parent); !exists || !cfg.accepts(key.family) || (!failure.retryAt.IsZero() && !time.Now().Before(failure.retryAt)) {
-			delete(m.parentFailures, key)
-		}
-	}
-	// Keep a persistent cursor. A slow failed candidate can outlive a previous
-	// slot's cooldown; restarting from the first hash would starve later nodes.
-	// Try every parent before moving to the other family or another slot.
-	var first, after slot
-	foundFirst, foundAfter := false, false
-findCandidate:
-	for index := 0; index < rounds; index++ {
-		for _, family := range []warp.Family{warp.IPv4, warp.IPv6} {
-			for _, parent := range parents {
-				if !cfg.accepts(family) {
-					continue
-				}
-				if time.Now().Before(m.parentFailures[parentFamily{parent.Hash, family}].retryAt) {
-					continue
-				}
-				key := slot{parent.Hash, family, index}
-				if _, exists := m.active[key]; exists || time.Now().Before(m.nextTry[key]) {
-					continue
-				}
-				if !foundFirst {
-					first, foundFirst = key, true
-				}
-				if !foundAfter && (!m.hasLastAttempt || compareSlots(key, m.lastAttempt) > 0) {
-					after, foundAfter = key, true
-					break findCandidate
-				}
-			}
-		}
-	}
-	if !foundAfter {
-		after, foundAfter = first, foundFirst
-	}
-	if foundAfter {
-		if parent, live := m.opts.Pool.GetEntry(after.parent); live && m.eligible(parent) {
-			m.lastAttempt, m.hasLastAttempt = after, true
-			m.create(ctx, cfg, after, parent)
-		}
-	}
-}
-
-func compareSlots(a, b slot) int {
-	if a.index != b.index {
-		if a.index < b.index {
-			return -1
-		}
-		return 1
-	}
-	if a.family != b.family {
-		if a.family == warp.IPv4 {
-			return -1
-		}
-		return 1
-	}
-	return slices.Compare(a.parent[:], b.parent[:])
 }
 
 // attemptContext cancels a registration promptly when settings change, so a
@@ -411,110 +393,4 @@ func (m *Manager) duplicate(ip netip.Addr) (slot, bool, bool) {
 		}
 	}
 	return slot{}, false, false
-}
-
-func (m *Manager) create(ctx context.Context, cfg settings, key slot, parent *node.NodeEntry) {
-	managedSub := m.managedSubscription()
-	m.recordProgress()
-	failureKey := parentFamily{key.parent, key.family}
-	via := parent.Outbound.Load()
-	if via == nil {
-		return
-	}
-	parentName := m.opts.Pool.ResolveNodeDisplayTag(parent.Hash)
-	if parentName == "" {
-		parentName = (*via).Tag()
-	}
-	parentContext := fmt.Sprintf("parent=%s name=%q protocol=%s family=%s slot=%d", parent.Hash.Hex(), parentName, (*via).Type(), key.family, key.index+1)
-	var best Candidate
-	defer func() { closeCandidate(best) }()
-	for attempt := 0; attempt < cfg.tries; attempt++ {
-		m.recordProgress()
-		attemptCtx, cancel := m.attemptContext(ctx, cfg)
-		candidate, err := m.opts.Create(attemptCtx, *via, key.family)
-		cancel()
-		if err != nil {
-			closeCandidate(candidate)
-			if ctx.Err() != nil || m.currentSettings() != cfg {
-				return
-			}
-			failure := m.parentFailures[failureKey]
-			failure.consecutive++
-			message := fmt.Sprintf("%s failures=%d/%d: %v", parentContext, failure.consecutive, parentFailureLimit, err)
-			if failure.consecutive >= parentFailureLimit {
-				failure.retryAt = time.Now().Add(parentFailureCooldown)
-				message += fmt.Sprintf("; parent family paused until %s", failure.retryAt.Format(time.RFC3339))
-			}
-			m.parentFailures[failureKey] = failure
-			if managedSub != nil {
-				managedSub.SetLastError(message)
-			}
-			m.opts.Logf("WARP %s", message)
-			break // reconnect budget is for duplicate IPs, not broken transports
-		}
-		delete(m.parentFailures, failureKey)
-		candidate.IP = candidate.IP.Unmap()
-		if candidate.Outbound == nil || !candidate.IP.IsGlobalUnicast() ||
-			(key.family == warp.IPv4 && !candidate.IP.Is4()) ||
-			(key.family == warp.IPv6 && !candidate.IP.Is6()) || candidate.Latency <= 0 {
-			closeCandidate(candidate)
-			continue
-		}
-		_, duplicate, base := m.duplicate(candidate.IP)
-		if !duplicate {
-			closeCandidate(best)
-			best = candidate
-			break
-		}
-		m.opts.Logf("WARP duplicate exit=%s parent=%s family=%s attempt=%d/%d", candidate.IP, key.parent.Hex(), key.family, attempt+1, cfg.tries)
-		if !base && (best.Outbound == nil || candidate.Latency < best.Latency) {
-			closeCandidate(best)
-			best = candidate
-		} else {
-			closeCandidate(candidate)
-		}
-	}
-	m.nextTry[key] = time.Now().Add(time.Minute)
-	if best.Outbound == nil || ctx.Err() != nil || m.currentSettings() != cfg {
-		return
-	}
-	current, live := m.opts.Pool.GetEntry(key.parent)
-	if !live || current != parent || !m.eligible(parent) || parent.Outbound.Load() != via {
-		return
-	}
-	if other, duplicate, base := m.duplicate(best.IP); duplicate {
-		m.nextTry[key] = time.Now().Add(5 * time.Minute)
-		if base || m.latency(m.active[other].entry) <= best.Latency {
-			return
-		}
-		m.remove(other)
-		m.nextTry[other] = time.Now().Add(5 * time.Minute)
-	}
-	raw, _ := json.Marshal(struct {
-		Type       string      `json:"type"`
-		Parent     string      `json:"parent_hash"`
-		Family     warp.Family `json:"family"`
-		Slot       int         `json:"slot"`
-		Generation uint64      `json:"generation"`
-	}{"resin-warp", key.parent.Hex(), key.family, key.index + 1, exitGeneration.Add(1)})
-	entry := node.NewNodeEntry(node.HashFromRawOptions(raw), raw, time.Now(), max(1, m.opts.MaxLatencyEntries))
-	parentHash := key.parent
-	entry.ParentHash, entry.WarpFamily = &parentHash, string(key.family)
-	ob := best.Outbound
-	entry.Outbound.Store(&ob)
-	entry.SetEgressIP(best.IP)
-	entry.LastEgressUpdate.Store(time.Now().UnixNano())
-	entry.LatencyTable.Update("cloudflare.com", best.Latency, 10*time.Minute)
-	if !m.opts.Pool.AddDerivedNode(entry, parent) {
-		entry.LatencyTable.Close()
-		return
-	}
-	m.active[key] = managedExit{entry, parent, via}
-	if managedSub != nil {
-		managedSub.SetLastError("")
-		managedSub.LastUpdatedNs.Store(time.Now().UnixNano())
-	}
-	m.opts.Logf("WARP ready parent=%s family=%s slot=%d exit=%s latency=%s", key.parent.Hex(), key.family, key.index+1, best.IP, best.Latency)
-	best = Candidate{} // pool removal callback now owns the outbound
-	delete(m.nextTry, key)
 }

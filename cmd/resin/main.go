@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -340,6 +341,7 @@ func newTopologyRuntime(
 			return runtimeConfigSnapshot(runtimeCfg)
 		},
 		MaxLatencyEntries: envCfg.MaxLatencyTableEntries,
+		HistoryPath:       filepath.Join(envCfg.CacheDir, "warp-parents.json"),
 	})
 
 	scheduler := topology.NewSubscriptionScheduler(topology.SchedulerConfig{

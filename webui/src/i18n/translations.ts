@@ -16,6 +16,7 @@ const EXACT_ZH_TO_EN: Record<string, string> = {
   "最近尝试失败": "Recent attempt failed",
   "自动维护长时间未响应，请检查服务状态。": "Automatic maintenance has not responded for some time. Check the service status.",
   "上限 {{count}}": "Limit {{count}}",
+  "IPv6 {{ipv6}} · IPv4 {{ipv4}}": "IPv6 {{ipv6}} · IPv4 {{ipv4}}",
   "WARP 出口总上限": "Total WARP exit limit",
   "启用 WARP 订阅": "Enable WARP subscription",
   "WARP 出口上限必须是 1 到 1024 之间的整数": "The WARP exit limit must be an integer between 1 and 1024",

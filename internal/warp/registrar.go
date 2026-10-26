@@ -49,29 +49,49 @@ type registration struct {
 
 // Registrar shares a registration rate limit across all parent nodes.
 type registrar struct {
-	base string
-	gap  time.Duration
-	mu   sync.Mutex
-	next time.Time
+	base          string
+	gap           time.Duration
+	mu            sync.Mutex
+	next          time.Time
+	cooldownUntil time.Time
+	rateFailures  int
+	changed       chan struct{}
 }
 
 func (r *registrar) wait(ctx context.Context) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if delay := time.Until(r.next); delay > 0 {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		r.mu.Lock()
+		now := time.Now()
+		if limited := r.currentRateLimitLocked(now); limited != nil {
+			r.mu.Unlock()
+			return limited // preserve the attempt budget for actual tunnel work
+		}
+		delay := r.next.Sub(now)
+		if delay <= 0 {
+			r.next = now.Add(r.gap)
+			r.mu.Unlock()
+			return nil
+		}
+		if r.changed == nil {
+			r.changed = make(chan struct{})
+		}
+		changed := r.changed
+		r.mu.Unlock()
+		// Recheck the shared deadline after every wakeup. Reserving future
+		// slots in advance lets stale workers overwrite a later 429 pause.
 		timer := time.NewTimer(delay)
-		defer timer.Stop()
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return ctx.Err()
+		case <-changed:
+			timer.Stop()
 		case <-timer.C:
 		}
 	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	r.next = time.Now().Add(r.gap)
-	return nil
 }
 
 func (r *registrar) register(ctx context.Context, parent adapter.Outbound) (registration, error) {
@@ -143,6 +163,11 @@ func (r *registrar) register(ctx context.Context, parent adapter.Outbound) (regi
 	if key, err := base64.StdEncoding.DecodeString(reg.peerKey); err != nil || len(key) != 32 {
 		return registration{}, errors.New("WARP configuration contains an invalid peer key")
 	}
+	r.mu.Lock()
+	if !r.cooldownUntil.After(time.Now()) {
+		r.rateFailures = 0
+	}
+	r.mu.Unlock()
 	return reg, nil
 }
 
@@ -284,6 +309,15 @@ func parseEndpoint(value string) (netip.AddrPort, error) {
 }
 
 func (r *registrar) request(ctx context.Context, client *http.Client, method, path, token string, payload any, target *device) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	limited := r.currentRateLimitLocked(time.Now())
+	r.mu.Unlock()
+	if limited != nil {
+		return limited
+	}
 	var body io.Reader
 	if payload != nil {
 		data, err := json.Marshal(payload)
@@ -307,6 +341,9 @@ func (r *registrar) request(ctx context.Context, client *http.Client, method, pa
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return r.rateLimited(resp.Header.Get("Retry-After"))
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		// API error bodies can contain device credentials. Keep them out of logs.
 		return fmt.Errorf("Cloudflare API HTTP %d", resp.StatusCode)

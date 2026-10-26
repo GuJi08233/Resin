@@ -595,6 +595,7 @@ export function SubscriptionPage() {
           return <div>
             <span>{`${s.healthy_node_count} / ${s.node_count}`}</span>
             {isWarpSubscription(s) ? <p className="muted">{t("上限 {{count}}", { count: s.max_nodes ?? 300 })}</p> : null}
+            {isWarpSubscription(s) ? <p className="muted">{t("IPv6 {{ipv6}} · IPv4 {{ipv4}}", { ipv6: s.ipv6_node_count ?? 0, ipv4: s.ipv4_node_count ?? 0 })}</p> : null}
           </div>;
         },
       }),

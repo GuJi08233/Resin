@@ -18,7 +18,7 @@ func newWarpSubscriptionHarness(t *testing.T) patchHarness {
 	h := newPatchHarness(t)
 	h.cp.SubMgr = topology.NewSubscriptionManager()
 	h.cp.Pool = topology.NewGlobalNodePool(topology.PoolConfig{
-		SubLookup: h.cp.SubMgr.Lookup, MaxConsecutiveFailures: func() int { return 3 },
+		SubLookup: h.cp.SubMgr.Lookup, MaxConsecutiveFailures: func() int { return 3 }, MaxLatencyTableEntries: 16,
 	})
 	return h
 }
@@ -205,5 +205,57 @@ func TestWarpSubscriptionReportsActualMaintenanceProgress(t *testing.T) {
 	_ = json.Unmarshal(data, &fields)
 	if _, ok := fields["maintenance_status"]; ok {
 		t.Fatalf("ordinary subscription acquired WARP maintenance fields: %s", data)
+	}
+}
+
+func TestWarpSubscriptionCountsPublishedAddressFamilies(t *testing.T) {
+	h := newWarpSubscriptionHarness(t)
+	if _, err := h.cp.UpdateSubscription(subscription.WarpSubscriptionID, []byte(`{"enabled":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	ordinary := subscription.NewSubscription("family-parents", "Parents", "", true, false)
+	h.cp.SubMgr.Register(ordinary)
+	firstParent := addRoutableNodeForSubscriptionWithTag(t, h.cp.Pool, ordinary,
+		[]byte(`{"type":"socks","server":"192.0.2.10","server_port":1080}`), "203.0.113.10", "first")
+	secondParent := addRoutableNodeForSubscriptionWithTag(t, h.cp.Pool, ordinary,
+		[]byte(`{"type":"socks","server":"192.0.2.11","server_port":1080}`), "203.0.113.11", "second")
+	ipv4 := addDerivedNodeForList(t, h.cp.Pool, firstParent, "ipv4")
+	ipv6 := addDerivedNodeForList(t, h.cp.Pool, firstParent, "ipv6")
+	unhealthyIPv6 := addDerivedNodeForList(t, h.cp.Pool, secondParent, "ipv6")
+	unhealthy, _ := h.cp.Pool.GetEntry(unhealthyIPv6)
+	unhealthy.CircuitOpenSince.Store(time.Now().UnixNano())
+	got, err := h.cp.GetSubscription(subscription.WarpSubscriptionID)
+	if err != nil || got.NodeCount != 3 || got.HealthyNodeCount != 2 || got.IPv4NodeCount != 1 || got.IPv6NodeCount != 2 {
+		t.Fatalf("published family counts were confused with healthy counts: %+v, %v", got, err)
+	}
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(encoded, &fields); err != nil || fields["ipv4_node_count"] != float64(1) || fields["ipv6_node_count"] != float64(2) {
+		t.Fatalf("published family counts missing from JSON: %s, %v", encoded, err)
+	}
+	warpSub := h.cp.SubMgr.Lookup(subscription.WarpSubscriptionID)
+	managedIPv4, _ := warpSub.ManagedNodes().LoadNode(ipv4)
+	managedIPv4.Evicted = true
+	warpSub.ManagedNodes().StoreNode(ipv4, managedIPv4)
+	got, err = h.cp.GetSubscription(subscription.WarpSubscriptionID)
+	if err != nil || got.NodeCount != 2 || got.IPv4NodeCount != 0 || got.IPv6NodeCount != 2 {
+		t.Fatalf("evicted entry remained in family counts: %+v, %v", got, err)
+	}
+	h.cp.Pool.RemoveDerivedNode(ipv6)
+	got, err = h.cp.GetSubscription(subscription.WarpSubscriptionID)
+	if err != nil || got.NodeCount != 1 || got.HealthyNodeCount != 0 || got.IPv4NodeCount != 0 || got.IPv6NodeCount != 1 {
+		t.Fatalf("removed entry remained in family counts: %+v, %v", got, err)
+	}
+	ordinaryResponse := h.cp.subToResponse(ordinary)
+	encoded, _ = json.Marshal(ordinaryResponse)
+	fields = make(map[string]any)
+	_ = json.Unmarshal(encoded, &fields)
+	for _, key := range []string{"ipv4_node_count", "ipv6_node_count"} {
+		if _, exists := fields[key]; exists {
+			t.Fatalf("ordinary subscription acquired WARP-only counts: %s", encoded)
+		}
 	}
 }

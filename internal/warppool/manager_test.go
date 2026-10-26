@@ -103,7 +103,7 @@ func (f *poolFixture) configure(change func(*config.RuntimeConfig)) {
 
 func (f *poolFixture) manager(t *testing.T, create CreateFunc) *Manager {
 	t.Helper()
-	mgr := NewManager(Options{Pool: f.pool, Subscriptions: f.subs, Settings: f.config.Load, Create: create, Logf: func(string, ...any) {}})
+	mgr := NewManager(Options{Pool: f.pool, Subscriptions: f.subs, Settings: f.config.Load, Create: create, Concurrency: 1, Logf: func(string, ...any) {}})
 	t.Cleanup(func() { mgr.Stop(); mgr.clear() })
 	return mgr
 }
@@ -175,12 +175,17 @@ func TestManagerReconnectsDuplicateUntilUnique(t *testing.T) {
 		calls++
 		return candidate, nil
 	})
-	mgr.reconcile(context.Background())
-	mgr.reconcile(context.Background())
+	for expected := 1; expected <= len(queue); expected++ {
+		expireSchedulingSlotCooldowns(mgr)
+		mgr.reconcile(context.Background())
+		if calls != expected {
+			t.Fatalf("one duplicate consumed more than one scheduling quantum: calls=%d want=%d", calls, expected)
+		}
+	}
 	if calls != 4 || len(mgr.active) != 2 {
 		t.Fatalf("factory calls=%d active=%d", calls, len(mgr.active))
 	}
-	if duplicateBestOB.closed.Load() != 1 || duplicateSlowOB.closed.Load() != 1 || firstOB.closed.Load() != 0 || uniqueOB.closed.Load() != 0 {
+	if duplicateBestOB.closed.Load() != 0 || duplicateSlowOB.closed.Load() != 1 || firstOB.closed.Load() != 1 || uniqueOB.closed.Load() != 0 {
 		t.Fatal("duplicate retries leaked candidates or closed selected unique exits")
 	}
 }
@@ -203,9 +208,13 @@ func TestManagerExhaustedDuplicatesKeepFastestRoute(t *testing.T) {
 		calls++
 		return candidate, nil
 	})
-	mgr.reconcile(context.Background())
-	mgr.reconcile(context.Background())
-	mgr.reconcile(context.Background())
+	for expected := 1; expected <= len(queue); expected++ {
+		expireSchedulingSlotCooldowns(mgr)
+		mgr.reconcile(context.Background())
+		if calls != expected {
+			t.Fatalf("duplicate retries did not yield between attempts: calls=%d want=%d", calls, expected)
+		}
+	}
 	if len(mgr.active) != 1 || calls != 4 || f.pool.Size() != 2 {
 		t.Fatalf("active=%d calls=%d pool=%d", len(mgr.active), calls, f.pool.Size())
 	}
@@ -223,6 +232,10 @@ func TestManagerExhaustedDuplicatesKeepFastestRoute(t *testing.T) {
 			t.Fatalf("candidate %d close count=%d want=%d", i, got, want)
 		}
 	}
+	mgr.reconcile(context.Background())
+	if calls != len(queue) {
+		t.Fatal("exhausted duplicate retry budget ignored its cooldown")
+	}
 }
 
 func TestManagerNeverReplacesOriginalIP(t *testing.T) {
@@ -233,7 +246,13 @@ func TestManagerNeverReplacesOriginalIP(t *testing.T) {
 		created = append(created, outbound)
 		return candidate, nil
 	})
-	mgr.reconcile(context.Background())
+	for expected := 1; expected <= 3; expected++ {
+		expireSchedulingSlotCooldowns(mgr)
+		mgr.reconcile(context.Background())
+		if len(created) != expected {
+			t.Fatalf("original-IP collision did not yield: calls=%d want=%d", len(created), expected)
+		}
+	}
 	if len(created) != 3 || len(mgr.active) != 0 || f.pool.Size() != 1 || f.parent.Outbound.Load() == nil {
 		t.Fatal("original-IP collision replaced the original route or ignored retry bound")
 	}
@@ -300,6 +319,16 @@ func TestManagerDeduplicatesAddressesChangedByRegularProbe(t *testing.T) {
 						t.Fatalf("replacement IP = %s", got)
 					}
 				} else {
+					if len(created) != 3 {
+						t.Fatalf("duplicate reconnect used more than one quantum: created=%d", len(created))
+					}
+					for expected := 4; expected <= 5; expected++ {
+						expireSchedulingSlotCooldowns(mgr)
+						mgr.reconcile(context.Background())
+						if len(created) != expected {
+							t.Fatalf("deferred duplicate reconnect: created=%d want=%d", len(created), expected)
+						}
+					}
 					if len(mgr.active) != 1 || len(created) != 5 {
 						t.Fatalf("exhausted reconnect: active=%d created=%d; want fastest exit after three duplicate attempts", len(mgr.active), len(created))
 					}

@@ -9,6 +9,8 @@ export type Subscription = {
   update_interval: string;
   node_count: number;
   healthy_node_count: number;
+  ipv4_node_count?: number;
+  ipv6_node_count?: number;
   ephemeral: boolean;
   incremental_alive_nodes: boolean;
   ephemeral_node_evict_delay: string;

@@ -133,8 +133,8 @@ func TestManagerFillsCapacityDespiteUnproductiveLanes(t *testing.T) {
 					t.Fatalf("slot allocation exceeded bounded candidate space: %+v", key)
 				}
 			}
-			if mode == "failed family" && mgr.parentFailures[parentFamily{f.parent.Hash, warp.IPv6}].retryAt.IsZero() {
-				t.Fatal("repeated IPv6 failures did not pause only the failing family")
+			if mode == "failed family" && mgr.parentFailures[parentFamily{f.parent.Hash, warp.IPv6}].consecutive == 0 {
+				t.Fatal("failed IPv6 lane was neither attempted nor recorded")
 			}
 		})
 	}

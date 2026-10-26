@@ -55,7 +55,7 @@ func expireSchedulingSlotCooldowns(manager *Manager) {
 	}
 }
 
-func TestManagerSlowFailuresKeepRotatingParentsBeforeFamilies(t *testing.T) {
+func TestManagerSlowFailuresVisitEveryParentBeforeRetrying(t *testing.T) {
 	f := newPoolFixture(t)
 	f.configure(func(cfg *config.RuntimeConfig) {
 		cfg.WarpStack, cfg.WarpMaxNodes, cfg.WarpReconnectAttempts = "dual", 300, 3
@@ -86,12 +86,15 @@ func TestManagerSlowFailuresKeepRotatingParentsBeforeFamilies(t *testing.T) {
 		if len(attempted) != index+1 {
 			t.Fatalf("ordinary timeout consumed multiple factory calls: got %d after %d slots", len(attempted), index+1)
 		}
-		want := attemptedParent{parents[index%len(parents)].Hash, warp.IPv4}
-		if index >= len(parents) {
-			want.family = warp.IPv6
+		if index == 0 && attempted[index].family != warp.IPv6 {
+			t.Fatal("dual-stack recovery did not prefer IPv6 on the initial tie")
 		}
-		if attempted[index] != want {
-			t.Fatalf("expired earlier cooldown starved later parent/family: attempt %d got %+v, want %+v; history=%+v", index, attempted[index], want, attempted)
+		if index < len(parents) {
+			for previous := 0; previous < index; previous++ {
+				if attempted[index].hash == attempted[previous].hash {
+					t.Fatalf("retried a slow parent before visiting all available parents: history=%+v", attempted)
+				}
+			}
 		}
 	}
 	if len(manager.active) != 0 || f.subs.Lookup(subscription.WarpSubscriptionID).ManagedNodes().Size() != 0 {
@@ -111,16 +114,18 @@ func TestManagerBadParentsDoNotBlockAWorkingParent(t *testing.T) {
 	working := parents[len(parents)-1]
 	workingOutbound := *working.Outbound.Load()
 	var attempts []adapter.Outbound
+	var attemptedFamilies []warp.Family
 	var selected *memoryOutbound
 	manager := f.manager(t, func(_ context.Context, parent adapter.Outbound, family warp.Family) (Candidate, error) {
 		attempts = append(attempts, parent)
+		attemptedFamilies = append(attemptedFamilies, family)
 		if parent != workingOutbound {
 			return Candidate{}, errors.New("verify WARP through parent: deadline exceeded")
 		}
-		if family != warp.IPv4 {
-			t.Fatal("working parent's IPv4 slot was skipped behind failed parents' IPv6 slots")
+		if family != warp.IPv6 {
+			t.Fatal("dual-stack recovery did not try the working parent's IPv6 route first")
 		}
-		candidate, outbound := testCandidate("198.51.100.200", 12*time.Millisecond)
+		candidate, outbound := testCandidate("2001:db8::200", 12*time.Millisecond)
 		selected = outbound
 		return candidate, nil
 	})
@@ -137,7 +142,7 @@ func TestManagerBadParentsDoNotBlockAWorkingParent(t *testing.T) {
 				"parent=" + parent.Hash.Hex(),
 				"name=" + fmt.Sprintf("%q", f.pool.ResolveNodeDisplayTag(parent.Hash)),
 				"protocol=" + (*parent.Outbound.Load()).Type(),
-				"family=ipv4", "slot=1", "failures=1/3", "deadline exceeded",
+				"family=" + string(attemptedFamilies[index]), "slot=1", "failures=1/3", "deadline exceeded",
 			} {
 				if !strings.Contains(message, required) {
 					t.Fatalf("WARP error lacks actionable parent context %q: %q", required, message)
@@ -155,7 +160,7 @@ func TestManagerBadParentsDoNotBlockAWorkingParent(t *testing.T) {
 		t.Fatal("working parent failed to publish a live WARP exit")
 	}
 	for key := range manager.active {
-		if key.parent != working.Hash || key.family != warp.IPv4 {
+		if key.parent != working.Hash || key.family != warp.IPv6 {
 			t.Fatalf("published exit belongs to wrong parent or family: %+v", key)
 		}
 	}
