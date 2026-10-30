@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -167,6 +168,9 @@ func TestParentHistoryBoundsEntriesAndRetainsNewestSuccesses(t *testing.T) {
 }
 
 func TestParentHistoryFlushReplacesAtomicallyWithPrivatePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix permission bits and rename over an open file are POSIX semantics")
+	}
 	path := filepath.Join(t.TempDir(), "warp-parents.json")
 	if err := os.WriteFile(path, []byte(`{"version":1,"entries":[]}`), 0o644); err != nil {
 		t.Fatal(err)

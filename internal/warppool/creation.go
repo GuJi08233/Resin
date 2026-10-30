@@ -144,15 +144,44 @@ func (m *Manager) completeAttempt(ctx context.Context, result creationResult) {
 			m.opts.Logf("WARP %s", message)
 			return
 		}
-		failure := m.parentFailures[failureKey]
-		failure.consecutive++
-		message := fmt.Sprintf("%s failures=%d/%d: %v", parentContext, failure.consecutive, parentFailureLimit, result.err)
-		if failure.consecutive >= parentFailureLimit {
-			failure.retryAt = time.Now().Add(parentFailureCooldown)
-			message += fmt.Sprintf("; parent family paused until %s", failure.retryAt.Format(time.RFC3339))
+		now := time.Now()
+		// A parent that cannot relay UDP fails every family alike. Charge
+		// all of its lanes, and pause at once when it explicitly refused UDP.
+		udpErr, parentWide := warp.AsParentUDPError(result.err)
+		lanes := []parentFamily{failureKey}
+		if parentWide {
+			for _, family := range []warp.Family{warp.IPv6, warp.IPv4} {
+				if lane := (parentFamily{key.parent, family}); family != key.family && cfg.accepts(family) && !now.Before(m.parentFailures[lane].retryAt) {
+					lanes = append(lanes, lane)
+				}
+			}
 		}
-		m.parentFailures[failureKey] = failure
-		m.nextTry[key] = time.Now().Add(time.Minute)
+		for _, lane := range lanes {
+			failure := m.parentFailures[lane]
+			failure.consecutive++
+			if parentWide && udpErr.Rejected {
+				failure.consecutive = max(failure.consecutive, parentFailureLimit)
+			}
+			if failure.consecutive >= parentFailureLimit {
+				failure.rounds++
+				failure.retryAt = now.Add(failureCooldown(failure.rounds))
+			}
+			m.parentFailures[lane] = failure
+		}
+		failure := m.parentFailures[failureKey]
+		scope := ""
+		if parentWide {
+			scope = " scope=parent"
+		}
+		message := fmt.Sprintf("%s%s failures=%d/%d: %v", parentContext, scope, failure.consecutive, parentFailureLimit, result.err)
+		if !failure.retryAt.IsZero() {
+			if parentWide {
+				message += fmt.Sprintf("; parent paused for all families until %s", failure.retryAt.Format(time.RFC3339))
+			} else {
+				message += fmt.Sprintf("; parent family paused until %s", failure.retryAt.Format(time.RFC3339))
+			}
+		}
+		m.nextTry[key] = now.Add(time.Minute)
 		if sub := m.managedSubscription(); sub != nil && !time.Now().Before(m.rateRetryAt) {
 			sub.SetLastError(message)
 		}

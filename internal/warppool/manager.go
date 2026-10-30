@@ -57,13 +57,28 @@ type managedExit struct {
 }
 
 const (
-	parentFailureLimit    = 3
-	parentFailureCooldown = 30 * time.Minute
+	parentFailureLimit       = 3
+	parentFailureCooldown    = 30 * time.Minute
+	parentFailureMaxCooldown = 6 * time.Hour
+	// The factory reports progress after each phase; this only bounds a
+	// worker that stops responding entirely.
+	attemptTimeout = 3 * time.Minute
 )
 
 type parentFailure struct {
 	consecutive int
 	retryAt     time.Time
+	rounds      int // exhausted streaks since the last success; doubles the pause
+}
+
+// failureCooldown doubles the pause for a lane that keeps failing after each
+// retry window, so persistently broken parents stop consuming attempt slots.
+func failureCooldown(rounds int) time.Duration {
+	cooldown := parentFailureCooldown
+	for ; rounds > 1 && cooldown < parentFailureMaxCooldown; rounds-- {
+		cooldown *= 2
+	}
+	return min(cooldown, parentFailureMaxCooldown)
 }
 
 type parentFamily struct {
@@ -361,7 +376,7 @@ func (m *Manager) reconcile(ctx context.Context) {
 // attemptContext cancels a registration promptly when settings change, so a
 // disabled WARP feature cannot leave a long-running factory call publishing.
 func (m *Manager) attemptContext(ctx context.Context, expected settings) (context.Context, func()) {
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	ctx, cancel := context.WithTimeout(warp.WithProgress(ctx, m.recordProgress), attemptTimeout)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)

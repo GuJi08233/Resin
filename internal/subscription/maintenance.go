@@ -2,8 +2,9 @@ package subscription
 
 import "time"
 
-// A factory attempt has a 60-second deadline. Allow scheduling and cleanup
-// headroom without hiding a blocked maintenance worker for hours.
+// A factory attempt reports progress after each phase (UDP probe, device
+// registration, each endpoint probe), each of which is bounded well below this.
+// Allow scheduling headroom without hiding a blocked worker for hours.
 const MaintenanceStallThreshold = 90 * time.Second
 
 // RecordMaintenance records actual worker progress. For a managed subscription,

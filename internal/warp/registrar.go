@@ -45,6 +45,8 @@ type registration struct {
 	addresses               []netip.Prefix
 	endpoints               []netip.AddrPort
 	reserved                []byte
+	tries                   int       // tunnel attempts that used this device
+	expires                 time.Time // spare devices are discarded afterwards
 }
 
 // Registrar shares a registration rate limit across all parent nodes.

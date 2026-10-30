@@ -42,8 +42,12 @@ func (m *Manager) cleanScheduling(cfg settings, now time.Time) {
 		}
 	}
 	for key, failure := range m.parentFailures {
-		if _, live := m.opts.Pool.GetEntry(key.parent); !live || !cfg.accepts(key.family) || (!failure.retryAt.IsZero() && !now.Before(failure.retryAt)) {
+		if _, live := m.opts.Pool.GetEntry(key.parent); !live || !cfg.accepts(key.family) {
 			delete(m.parentFailures, key)
+		} else if !failure.retryAt.IsZero() && !now.Before(failure.retryAt) {
+			// Start a fresh streak, but remember the escalation until success.
+			failure.consecutive, failure.retryAt = 0, time.Time{}
+			m.parentFailures[key] = failure
 		}
 	}
 	for hash := range m.visited {

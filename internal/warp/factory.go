@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,10 +36,52 @@ type Factory struct {
 	// device registration and public network access.
 	openTunnel func(context.Context, adapter.Outbound, Family, registration, []netip.Prefix, netip.AddrPort) (*Exit, error)
 	verifyExit func(context.Context, *Exit) error
+	probeUDP   func(context.Context, adapter.Outbound) error
+
+	spareMu sync.Mutex
+	spares  []registration
 }
+
+const (
+	// The tunnel phase starts after registration, so queueing behind the
+	// shared registration gap cannot consume the endpoint attempt budget.
+	tunnelBudget         = 45 * time.Second
+	endpointProbeTimeout = 8 * time.Second
+	// A failed attempt leaves an unused device. Hand it to the next attempt
+	// instead of registering again, within bounded count, age, and reuse.
+	spareLimit           = 16
+	spareLifetime        = 30 * time.Minute
+	registrationMaxTries = 3
+)
 
 func NewFactory() *Factory {
 	return &Factory{registrar: &registrar{base: apiBase, gap: 12 * time.Second}}
+}
+
+func (f *Factory) takeSpare(now time.Time) (registration, bool) {
+	f.spareMu.Lock()
+	defer f.spareMu.Unlock()
+	for len(f.spares) > 0 {
+		last := len(f.spares) - 1
+		spare := f.spares[last]
+		f.spares = f.spares[:last]
+		if now.Before(spare.expires) {
+			return spare, true
+		}
+	}
+	return registration{}, false
+}
+
+func (f *Factory) keepSpare(reg registration) {
+	if reg.tries >= registrationMaxTries {
+		return
+	}
+	f.spareMu.Lock()
+	defer f.spareMu.Unlock()
+	if len(f.spares) >= spareLimit {
+		f.spares = slices.Delete(f.spares, 0, 1)
+	}
+	f.spares = append(f.spares, reg)
 }
 
 // Create registers a new device and returns only a verified WARP exit. Each
@@ -60,13 +103,33 @@ func (f *Factory) Create(ctx context.Context, parent adapter.Outbound, family Fa
 		}
 	}
 	if !udp {
-		return nil, errors.New("WARP parent does not support UDP")
+		return nil, &ParentUDPError{Rejected: true, Err: errors.New("WARP parent does not support UDP")}
 	}
-	reg, err := f.registrar.register(ctx, parent)
-	if err != nil {
-		return nil, err
+	probe := f.probeUDP
+	if probe == nil {
+		probe = probeParentUDP
 	}
-	return f.createRegistered(ctx, parent, family, reg)
+	if err := probe(ctx, parent); err != nil {
+		return nil, fmt.Errorf("probe WARP parent UDP: %w", err)
+	}
+	reportProgress(ctx)
+	reg, reused := f.takeSpare(time.Now())
+	if !reused {
+		var err error
+		if reg, err = f.registrar.register(ctx, parent); err != nil {
+			return nil, err
+		}
+		reg.expires = time.Now().Add(spareLifetime)
+		reportProgress(ctx)
+	}
+	reg.tries++
+	tunnelCtx, cancel := context.WithTimeout(ctx, tunnelBudget)
+	exit, err := f.createRegistered(tunnelCtx, parent, family, reg)
+	cancel()
+	if err != nil && ctx.Err() == nil {
+		f.keepSpare(reg)
+	}
+	return exit, err
 }
 
 func (f *Factory) createRegistered(ctx context.Context, parent adapter.Outbound, family Family, reg registration) (*Exit, error) {
@@ -111,9 +174,20 @@ func (f *Factory) createRegistered(ctx context.Context, parent adapter.Outbound,
 		exit, err := open(ctx, parent, family, reg, addresses, endpoint)
 		if err != nil {
 			recordFailure(endpoint, "tunnel_create", err)
+			reportProgress(ctx)
 			continue
 		}
-		probeCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		probeCtx, cancel := context.WithTimeout(ctx, endpointProbeTimeout)
+		if failed := exit.outerFailed(); failed != nil {
+			// Stop waiting for a TCP timeout once the parent refuses UDP.
+			go func() {
+				select {
+				case <-failed:
+					cancel()
+				case <-probeCtx.Done():
+				}
+			}()
+		}
 		err = verify(probeCtx, exit)
 		cancel()
 		if err == nil && ctx.Err() == nil {
@@ -124,6 +198,12 @@ func (f *Factory) createRegistered(ctx context.Context, parent adapter.Outbound,
 		}
 		recordFailure(endpoint, "verify", err)
 		exit.Close()
+		reportProgress(ctx)
+		if exit.outerFailure() {
+			// Every endpoint uses the same parent UDP association, so trying
+			// the remaining endpoints would only repeat the same refusal.
+			return nil, fmt.Errorf("verify WARP %s through parent attempts=%d: %w", family, attempts, &ParentUDPError{Err: lastErr})
+		}
 	}
 	if lastErr == nil {
 		lastErr = errors.New("registration contains no usable WireGuard endpoints")
@@ -195,7 +275,7 @@ func newTunnel(ctx context.Context, parent adapter.Outbound, family Family, reg 
 	// Setup belongs to the caller's attempt. A published tunnel has its own
 	// lifetime, since the manager cancels the attempt after successful creation.
 	stopSetupCancellation := context.AfterFunc(ctx, cancel)
-	outer := new(outerDiagnostics)
+	outer := newOuterDiagnostics()
 	inner, err := createEndpoint(lifetime, &diagnosticParentOutbound{Outbound: parent, state: outer}, reg, addresses, endpoint)
 	setupDetached := stopSetupCancellation()
 	if err != nil {
@@ -464,11 +544,21 @@ func (e *Exit) diagnosticError(phase string, err error) error {
 		phase, status, state.handshakeUnix, state.rxBytes, state.txBytes, outer, err)
 }
 
+// outerListenFailureLimit tolerates one transient parent hiccup; the bind
+// retries every second, so the limit is reached within about one second.
+const outerListenFailureLimit = 2
+
 type outerDiagnostics struct {
 	mu                   sync.Mutex
 	txPackets, rxPackets uint64
 	lastOp               string
 	lastError            error
+	listenFailures       int
+	failed               chan struct{}
+}
+
+func newOuterDiagnostics() *outerDiagnostics {
+	return &outerDiagnostics{failed: make(chan struct{})}
 }
 
 func (d *outerDiagnostics) record(operation string, transferred bool, err error) {
@@ -483,6 +573,34 @@ func (d *outerDiagnostics) record(operation string, transferred bool, err error)
 	}
 	if err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, context.Canceled) {
 		d.lastOp, d.lastError = operation, err
+		if operation == "listen_packet" && d.rxPackets == 0 && d.failed != nil {
+			d.listenFailures++
+			if d.listenFailures == outerListenFailureLimit {
+				close(d.failed)
+			}
+		}
+	}
+}
+
+// outerFailed is closed when the parent repeatedly refused the outer UDP
+// association before any WireGuard packet arrived.
+func (e *Exit) outerFailed() <-chan struct{} {
+	if e.outer == nil {
+		return nil
+	}
+	return e.outer.failed
+}
+
+func (e *Exit) outerFailure() bool {
+	failed := e.outerFailed()
+	if failed == nil {
+		return false
+	}
+	select {
+	case <-failed:
+		return true
+	default:
+		return false
 	}
 }
 
