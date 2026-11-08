@@ -968,7 +968,8 @@ func (p *GlobalNodePool) UpdateNodeEgressIP(hash node.Hash, ip *netip.Addr, loc 
 
 // UpdateNodeIPInfo records an IPPure reputation probe attempt and, when info
 // is non-nil, stores the parsed profile. A nil info means "attempt only".
-// Fires OnNodeDynamicChanged only when stored data actually changes.
+// Fires OnNodeDynamicChanged and platform re-evaluation when stored data
+// actually changes, because platforms may filter on the profile.
 func (p *GlobalNodePool) UpdateNodeIPInfo(hash node.Hash, info *ipinfo.Info) {
 	entry, ok := p.nodes.Load(hash)
 	if !ok {
@@ -977,17 +978,31 @@ func (p *GlobalNodePool) UpdateNodeIPInfo(hash node.Hash, info *ipinfo.Info) {
 
 	entry.LastIPInfoProbeAttempt.Store(time.Now().UnixNano())
 
-	if info == nil {
-		if entry.ParentHash == nil && p.onNodeDynamicChanged != nil {
-			p.onNodeDynamicChanged(hash)
-		}
-		return
+	changed := false
+	if info != nil {
+		old := entry.GetEgressIPInfo()
+		entry.SetEgressIPInfo(info)
+		changed = !ipInfoEqual(old, info)
 	}
 
-	entry.SetEgressIPInfo(info)
+	if changed {
+		p.notifyAllPlatformsDirty(hash)
+	}
 	if entry.ParentHash == nil && p.onNodeDynamicChanged != nil {
 		p.onNodeDynamicChanged(hash)
 	}
+}
+
+func ipInfoEqual(a, b *ipinfo.Info) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	// UpdatedAt is probe metadata, not filter input; ignore it so repeated
+	// probes of an unchanged profile do not trigger platform rebuilds.
+	aCopy, bCopy := *a, *b
+	aCopy.UpdatedAt = time.Time{}
+	bCopy.UpdatedAt = time.Time{}
+	return aCopy == bCopy
 }
 
 func (p *GlobalNodePool) isAuthorityDomain(domain string) bool {

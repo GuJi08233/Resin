@@ -6,6 +6,7 @@ import (
 
 	"github.com/Resinat/Resin/internal/ipinfo"
 	"github.com/Resinat/Resin/internal/node"
+	"github.com/Resinat/Resin/internal/platform"
 	"github.com/Resinat/Resin/internal/probe"
 	"github.com/Resinat/Resin/internal/subscription"
 )
@@ -25,6 +26,11 @@ type NodeFilters struct {
 	EgressIP       *string
 	ProbedSince    *time.Time
 	TagKeyword     *string
+
+	// IP profile filters, matched against the node's IPPure sample.
+	// Nodes without a sample never match an active profile filter.
+	IPInfoFilters platform.IPInfoFilter
+	HasIPInfo     *bool
 }
 
 // ListNodes returns nodes from the pool with optional filters.
@@ -197,6 +203,17 @@ func (s *ControlPlaneService) nodeEntryMatchesFilters(
 		if lastUpdate < filters.ProbedSince.UnixNano() {
 			return false
 		}
+	}
+	// IP profile presence filter.
+	ipInfo := entry.GetEgressIPInfo()
+	if filters.HasIPInfo != nil {
+		if (ipInfo != nil) != *filters.HasIPInfo {
+			return false
+		}
+	}
+	// IP profile filter.
+	if filters.IPInfoFilters.Active() && !filters.IPInfoFilters.Match(ipInfo) {
+		return false
 	}
 	return true
 }

@@ -40,6 +40,7 @@ import {
   statusCodeActionLabel,
 } from "./constants";
 import {
+  countIPInfoFilterConditions,
   defaultPlatformFormValues,
   platformFormSchema,
   platformNameRuleHint,
@@ -47,6 +48,7 @@ import {
   toPlatformUpdateInput,
   type PlatformFormValues,
 } from "./formModel";
+import { IPInfoFilterEditor } from "./IPInfoFilterEditor";
 import { PlatformAccessPanel } from "./PlatformAccessPanel";
 import { PlatformMonitorPanel } from "./PlatformMonitorPanel";
 import { StatusCodeRuleEditor } from "./StatusCodeRuleEditor";
@@ -489,6 +491,7 @@ export function PlatformDetailPage() {
   const regionCount = platform?.region_filters.length ?? 0;
   const regexCount = platform?.regex_filters.length ?? 0;
   const statusCodeRuleCount = platform?.status_code_rules.length ?? 0;
+  const ipInfoFilterCount = countIPInfoFilterConditions(platform?.ipinfo_filters);
   const deleteDisabled = !platform || platform.id === ZERO_UUID || deleteMutation.isPending;
 
   return (
@@ -580,6 +583,10 @@ export function PlatformDetailPage() {
                 <span className="platform-fact">
                   <span>{t("状态码规则")}</span>
                   <strong>{statusCodeRuleCount}</strong>
+                </span>
+                <span className="platform-fact">
+                  <span>{t("IP 画像过滤")}</span>
+                  <strong>{ipInfoFilterCount}</strong>
                 </span>
               </div>
             </div>
@@ -792,6 +799,8 @@ export function PlatformDetailPage() {
                       {t("支持反选：以 ! 开头可排除地区（如 !hk）。可与正选混用，最终结果为“先正选再排除”。")}
                     </p>
                   </div>
+
+                  <IPInfoFilterEditor form={editForm} idPrefix="detail-edit" />
 
                   <StatusCodeRuleEditor form={editForm} idPrefix="detail-edit" />
 

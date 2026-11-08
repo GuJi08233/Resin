@@ -106,6 +106,10 @@ func BuildFromModel(mp model.Platform) (*Platform, error) {
 	if err := ValidateRegionFilters(mp.RegionFilters); err != nil {
 		return nil, err
 	}
+	ipInfoFilters, err := CompileIPInfoFilter(mp.IPInfoFilters)
+	if err != nil {
+		return nil, fmt.Errorf("decode platform %s %w", mp.ID, err)
+	}
 	emptyAccountBehavior := mp.ReverseProxyEmptyAccountBehavior
 	if !ReverseProxyEmptyAccountBehavior(emptyAccountBehavior).IsValid() {
 		emptyAccountBehavior = string(ReverseProxyEmptyAccountBehaviorRandom)
@@ -147,6 +151,7 @@ func BuildFromModel(mp model.Platform) (*Platform, error) {
 		mp.AllocationPolicy,
 		mp.PassiveCircuitBreakerDisabled,
 	)
+	plat.IPInfoFilters = ipInfoFilters
 	plat.StatusCodeRules = statusCodeRules
 	return plat, nil
 }

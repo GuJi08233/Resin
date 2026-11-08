@@ -31,6 +31,7 @@
 * RegexFilters：节点标签过滤规则列表，语法见“节点标签过滤规则”。
 * RegexFiltersCompiled：按规则类型分组的编译结果。随着 RegexFilters 更新。
 * RegionFilters：一个地区列表。小写 ISO codes (e.g., "hk", "us")。节点的出口 IP 地区属于该列表才符合条件。空表示不做地区筛选。
+* IPInfoFilters：基于节点出口 IP 画像（IPPure）的过滤条件，包含风险分区间、IP 类型（住宅/机房）、原生属性（原生/广播）、ASN 白/黑名单。空表示不做画像筛选；一旦启用任一条件，没有画像样本的节点不会被该 Platform 路由。
 * 反向代理 Account 为空时的行为：随机路由 / 固定 Header 提取 / 按 Account Header Rule 提取。
 * 反向代理匹配 Account 失败后的行为：随机路由 或 拒绝请求。默认是随机路由。
 * 分配新节点的策略：偏好低延迟、偏好闲置 IP、均衡。默认是均衡。
@@ -279,9 +280,10 @@ No available proxy nodes
     1. 节点状态正常（非 Circuit Break）。
     2. 调用 `NodeEntry.MatchTagFilter(Platform.RegexFilters, subLookup)` 判断 Tag 是否匹配。
     3. 节点必须有出口 IP（无论 Platform 是否配置 `RegionFilters`）。
-    4. 若 `RegionFilters` 非空，则节点出口 IP 地区必须符合 `RegionFilters`。
-    5. 有至少一条延迟信息。
-    6. Outbound 不为空
+    4. 若 `RegionFilters` 非空，则节点出口 IP 地区必须符合 `RegionFilters`。地区解析顺序为：探测得到的显式地区 → GeoIP → 最近一次 IP 画像的国家码。
+    5. 若 `IPInfoFilters` 非空且启用任一条件，则节点必须有画像样本且满足全部条件。
+    6. 有至少一条延迟信息。
+    7. Outbound 不为空
 * 过滤源：遍历全局节点池中的所有 `NodeEntry`。
 
 ##### Platform 节点视图动态更新
@@ -293,6 +295,7 @@ Platform 应该向外提供一个脏更新的接口，用来通知脏节点。�
 
 动态更新的时机：
 	* 出口 IP 变更：当 `ProbeManager` 探测到节点出口 IP 发生变化（或从无到有）。属于脏更新。
+	* IP 画像变更：当 `ProbeManager` 探测到节点的 IP 画像发生变化（忽略 `updated_at`，重复探测同一画像不触发重建）。属于脏更新，因为 Platform 可能配置了 `IPInfoFilters`。
 	* 节点引用变更：当节点的 SubscriptionIDs 发生变化，可能会影响 MatchTagFilter 的结果（因为 Tag 集合变了）。属于脏更新。
 	* 熔断触发 / 恢复：属于脏更新。	
 	* Platform 过滤器配置变更：全量重建。
@@ -433,12 +436,13 @@ Resin 使用计数器熔断机制保护系统稳定性。
 
 #### IP 画像探测（IPPure）
 * 目标：全局节点池所有节点。默认关闭，需在运行时配置中开启 `IPInfoProbeEnabled`。
-* 职责：采集节点出口 IP 的位置、ASN、风险系数与纯净度，用于人工挑选出口或后续策略扩展。
+* 职责：采集节点出口 IP 的位置、ASN、风险系数与纯净度。数据用于三处：节点池展示与排序、节点池筛选查询参数、以及 Platform 的 `IPInfoFilters` 路由过滤。
 * 探测时机与调度策略：每隔 13～17 秒全局扫描一次，调度依据 `LastIPInfoProbeAttempt`，对未来 15 秒内将会或者已经超过 `MaxIPInfoTestInterval`（默认 12 小时）的节点进行探测。
 * 探测动作：**通过节点自身的 outbound** 请求 `IPInfoProbeURL`（默认 `https://my.ippure.com/v1/info`）。该公开接口只返回调用方 IP 的信息，因此必须经由节点发起，不能由宿主机直连。
 * 结果处理：
-    * 成功：调用 `UpdateNodeIPInfo(id, info)`，写入节点画像并记录尝试时间。
-    * 失败或解析失败：调用 `UpdateNodeIPInfo(id, nil)` 仅记录尝试时间，**不**调用 `RecordResult`，即 IP 画像探测失败不影响熔断状态。
+    * 成功：调用 `UpdateNodeIPInfo(id, info)`，写入节点画像并记录尝试时间。画像相对上次样本发生变化时（`updated_at` 不参与比较）会触发所有 Platform 对该节点做脏更新，因为平台可能配置了 `IPInfoFilters`。
+    * 失败或解析失败：调用 `UpdateNodeIPInfo(id, nil)` 仅记录尝试时间，**不**调用 `RecordResult`，即 IP 画像探测失败不影响熔断状态，也不清除已有画像。
+* 与地区的关系：节点的地区解析顺序为「出口探测的显式地区 → GeoIP → 画像国家码」，因此未安装 GeoIP 时地区过滤仍可工作。
 * 同步接口：`POST /nodes/{node_hash}/actions/probe-ipinfo`，不走异步队列限流。
 
 #### 主动探测的并发控制
@@ -607,7 +611,7 @@ Resin 项目中所有的数据库都设计为单写，不会有多进程写入�
 ### SQLite 数据模型
 #### state.db
 * system_config(config_json, version, updated_at_ns)
-* platforms(id PK, name UNIQUE, sticky_ttl_ns, regex_filters_json, region_filters_json, reverse_proxy_miss_action, reverse_proxy_empty_account_behavior, reverse_proxy_fixed_account_header, allocation_policy, passive_circuit_breaker_disabled, updated_at_ns)
+* platforms(id PK, name UNIQUE, sticky_ttl_ns, regex_filters_json, region_filters_json, ipinfo_filters_json, reverse_proxy_miss_action, reverse_proxy_empty_account_behavior, reverse_proxy_fixed_account_header, allocation_policy, passive_circuit_breaker_disabled, status_code_rules_json, updated_at_ns)
 * subscriptions(id PK, name, url, update_interval_ns, enabled, ephemeral, created_at_ns, updated_at_ns)
 * account_header_rules(url_prefix PK, headers_json, updated_at_ns)
 
@@ -1219,6 +1223,13 @@ Body（partial patch 示例）：
   "sticky_ttl": "30m",
   "regex_filters": ["*^sub1/.*", ".*hk.*", "!过期"],
   "region_filters": ["hk","us"],
+  "ipinfo_filters": {
+    "min_fraud_score": null,
+    "max_fraud_score": 50,
+    "ip_type": "any|residential|hosting",
+    "native": "any|native|broadcast",
+    "asns": ["132203", "!4134"]
+  },
   "routable_node_count": 123,
   "reverse_proxy_miss_action": "TREAT_AS_EMPTY|REJECT",
   "reverse_proxy_empty_account_behavior": "RANDOM|FIXED_HEADER|ACCOUNT_HEADER_RULE",
@@ -1248,6 +1259,13 @@ Body：
   "sticky_ttl": "168h",
   "regex_filters": ["^sub1/.*"],
   "region_filters": ["hk", "us"],
+  "ipinfo_filters": {
+    "min_fraud_score": 0,
+    "max_fraud_score": 40,
+    "ip_type": "residential",
+    "native": "native",
+    "asns": ["AS132203", "!4134"]
+  },
   "reverse_proxy_miss_action": "TREAT_AS_EMPTY",
   "reverse_proxy_empty_account_behavior": "ACCOUNT_HEADER_RULE",
   "reverse_proxy_fixed_account_header": "Authorization\nX-Account-Id",
@@ -1259,7 +1277,7 @@ Body：
 字段要求：
 
 * 必填字段：`name`
-* 可选字段：`sticky_ttl`、`regex_filters`、`region_filters`、`reverse_proxy_miss_action`、`reverse_proxy_empty_account_behavior`、`reverse_proxy_fixed_account_header`、`allocation_policy`、`passive_circuit_breaker_disabled`
+* 可选字段：`sticky_ttl`、`regex_filters`、`region_filters`、`ipinfo_filters`、`reverse_proxy_miss_action`、`reverse_proxy_empty_account_behavior`、`reverse_proxy_fixed_account_header`、`allocation_policy`、`passive_circuit_breaker_disabled`
 * 不可传字段：`id`、`updated_at`、`routable_node_count`
 * 省略可选字段时，平台策略字段使用当前环境变量默认平台设置（`RESIN_DEFAULT_PLATFORM_*`）对应值；`passive_circuit_breaker_disabled` 默认 `false`
 
@@ -1269,6 +1287,12 @@ Body：
 * `sticky_ttl`：合法 Go duration。
 * `regex_filters`：节点标签过滤规则列表，语义与校验见“节点标签过滤规则”。
 * `region_filters`：每项为 ISO 3166-1 alpha-2 小写代码。
+* `ipinfo_filters`：IP 画像过滤条件，子字段均可选。
+    * `min_fraud_score` / `max_fraud_score`：0-100 整数，闭区间；同时给出时 `min <= max`。
+    * `ip_type`：`any`（默认）| `residential` | `hosting`。
+    * `native`：`any`（默认）| `native` | `broadcast`。
+    * `asns`：ASN 列表。每项可带 `AS` 前缀与 `!` 取反前缀；不带 `!` 的项构成白名单（存在时必须命中其一），带 `!` 的项构成黑名单（命中即排除）。同一个 ASN 不能同时出现在两侧。存储时会归一化为不带 `AS` 前缀的形式。
+    * 启用任一条件后，没有画像样本的节点不会被该平台路由。
 * 枚举字段：`reverse_proxy_miss_action` 仅 `TREAT_AS_EMPTY|REJECT`；`reverse_proxy_empty_account_behavior` 仅 `RANDOM|FIXED_HEADER|ACCOUNT_HEADER_RULE`；`allocation_policy` 仅 `BALANCED|PREFER_LOW_LATENCY|PREFER_IDLE_IP`。
 * `passive_circuit_breaker_disabled`：布尔值。设为 `true` 后，此 Platform 的用户代理请求失败不会增加节点熔断计数；主动探测不受影响。成功请求仍会清除节点连续失败计数并可恢复熔断节点。
 * 组合约束：当 `reverse_proxy_empty_account_behavior=FIXED_HEADER` 时，`reverse_proxy_fixed_account_header` 必填；其值支持多行，每行一个合法 HTTP Header 字段名（会按顺序尝试提取）。
@@ -1299,7 +1323,7 @@ Body（partial patch 示例）：
 字段要求：
 
 * 必填字段：无
-* 可改字段：`name`、`sticky_ttl`、`regex_filters`、`region_filters`、`reverse_proxy_miss_action`、`reverse_proxy_empty_account_behavior`、`reverse_proxy_fixed_account_header`、`allocation_policy`、`passive_circuit_breaker_disabled`
+* 可改字段：`name`、`sticky_ttl`、`regex_filters`、`region_filters`、`ipinfo_filters`、`reverse_proxy_miss_action`、`reverse_proxy_empty_account_behavior`、`reverse_proxy_fixed_account_header`、`allocation_policy`、`passive_circuit_breaker_disabled`
 * 不可改字段：`id`、`updated_at`、`routable_node_count`
 
 关键校验：与“创建平台”一致。
@@ -1358,7 +1382,8 @@ Body（partial patch 示例）：
 {
   "platform_spec": {
     "regex_filters": ["^subA/.*"],
-    "region_filters": ["hk", "us"]
+    "region_filters": ["hk", "us"],
+    "ipinfo_filters": {"max_fraud_score": 40, "ip_type": "residential"}
   }
 }
 ```
@@ -1366,7 +1391,8 @@ Body（partial patch 示例）：
 字段要求：
 
 * 必填字段：`platform_id` 与 `platform_spec` 二选一，且只能出现一个。
-* `platform_spec` 仅允许字段：`regex_filters`、`region_filters`。
+* `platform_spec` 仅允许字段：`regex_filters`、`region_filters`、`ipinfo_filters`。
+* `platform_spec.ipinfo_filters`：语义与校验同 Platform 的 `ipinfo_filters`。
 
 关键校验（最小集）：
 
@@ -1728,10 +1754,17 @@ Query：
 * `has_outbound`：true|false（可选）
 * `egress_ip`：IP 地址（可选）
 * `probed_since`：RFC3339Nano（可选），按节点 `LastLatencyProbeAttempt` 过滤
+* `min_fraud_score` / `max_fraud_score`：0-100 整数（可选），按画像风险分过滤，闭区间
+* `ip_type`：`any` | `residential` | `hosting`（可选），按住宅/机房属性过滤
+* `native`：`any` | `native` | `broadcast`（可选），按原生/广播属性过滤
+* `asn`：单个 ASN、`AS` 前缀、`!` 取反，支持重复参数与逗号分隔（可选）
+* `has_ipinfo`：true|false（可选），按是否存在画像样本过滤
 * `sort_by`：排序字段（可选）
 * `sort_order`：`asc` 或 `desc`（可选）
 
-支持的 `sort_by`：`tag`、`created_at`、`failure_count`、`region`。其中 `tag` 表示按照节点 tag 排序。如果有多个 tag，按照所属 subscription 创建最早的那个。同 subscription 选字典序最小的。默认按 `tag` `asc` 排序。
+支持的 `sort_by`：`tag`、`created_at`、`failure_count`、`region`、`fraud_score`。其中 `tag` 表示按照节点 tag 排序。如果有多个 tag，按照所属 subscription 创建最早的那个。同 subscription 选字典序最小的。默认按 `tag` `asc` 排序。`fraud_score` 排序时没有画像的节点恒定排在最后，不随 `sort_order` 翻转。
+
+画像相关筛选一旦生效，没有画像样本的节点不会命中（`has_ipinfo=false` 除外）。`min_fraud_score` 大于 `max_fraud_score`、越界分数、非法 `ip_type`/`native`/`asn` 均返回 `400 INVALID_ARGUMENT`。
 
 Response：
 ```json
@@ -2548,7 +2581,7 @@ WebUI 分为登录态与控制台态。未登录时进入登录页；登录后�
 
 点击平台卡片，进入详细页面。主区域为 Tab：
 * 监控：展示平台级 KPI、趋势图、延迟分布、节点快照。
-* 配置：编辑平台策略与过滤规则并保存。
+* 配置：编辑平台策略与过滤规则（标签正则、地区、IP 画像过滤、状态码规则）并保存。
 * 运维：重置默认配置、清除所有租约、删除平台。
 
 ## 订阅管理
@@ -2561,11 +2594,11 @@ WebUI 分为登录态与控制台态。未登录时进入登录页；登录后�
 点击表格行会打开订阅 Drawer，内含订阅配置编辑（基础信息、错误状态）与运维操作（手动刷新、清理失效节点、删除订阅）。
 
 ## 节点池
-顶部为多条件过滤区，支持节点名、平台、订阅、区域、出口 IP、状态筛选，并提供刷新/重置按钮。
+顶部为多条件过滤区，支持节点名、平台、订阅、区域、出口 IP、状态、IP 类型、原生属性、画像状态、风险分区间与 ASN 筛选，并提供刷新/重置按钮。
 
-中部为节点表格，展示节点标签、出口、延迟、探测时间、失败次数、状态、创建时间等，并支持分页。
+中部为节点表格，展示节点标签、出口、IP 属性（原生/广播、住宅/机房、风险分、ASN）、延迟、探测时间、失败次数、状态、创建时间等，并支持分页。点击表头可按 tag、区域、连续失败、创建时间、风险分排序；按风险分排序时没有画像的节点恒定排在最后。
 
-点击表格行打开节点详情 Drawer，展示节点状态、别名标签与运维操作（出口探测、延迟探测）。
+点击表格行打开节点详情 Drawer，展示节点状态、别名标签、IP 画像详情与运维操作（出口探测、延迟探测、IP 画像探测）。
 
 ## 接入点
 页面以分页的单列卡片按自然阅读顺序展示端口、运行状态、已启用能力和代理认证策略。

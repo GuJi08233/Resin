@@ -2,12 +2,15 @@ package api
 
 import (
 	"cmp"
+	"fmt"
 	"math"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/Resinat/Resin/internal/platform"
 	"github.com/Resinat/Resin/internal/service"
 )
 
@@ -42,6 +45,10 @@ func compareNodeSummaries(sortBy string, a, b service.NodeSummary) int {
 		order = cmp.Compare(a.FailureCount, b.FailureCount)
 	case "region":
 		order = strings.Compare(a.Region, b.Region)
+	case "fraud_score":
+		if a.IPInfo != nil && b.IPInfo != nil {
+			order = cmp.Compare(a.IPInfo.FraudScore, b.IPInfo.FraudScore)
+		}
 	default:
 		order = strings.Compare(nodeTagSortKey(a), nodeTagSortKey(b))
 	}
@@ -53,6 +60,17 @@ func compareNodeSummaries(sortBy string, a, b service.NodeSummary) int {
 
 func sortNodeSummaries(nodes []service.NodeSummary, sorting Sorting) {
 	slices.SortStableFunc(nodes, func(a, b service.NodeSummary) int {
+		// Nodes without an IP profile always sort last, in both directions,
+		// so they do not crowd out scored nodes.
+		if sorting.SortBy == "fraud_score" {
+			aHas, bHas := a.IPInfo != nil, b.IPInfo != nil
+			if aHas != bHas {
+				if aHas {
+					return -1
+				}
+				return 1
+			}
+		}
 		return applySortOrder(compareNodeSummaries(sorting.SortBy, a, b), sorting.SortOrder)
 	})
 }
@@ -89,6 +107,95 @@ func countUniqueHealthyAndEnabledEgressIPs(nodes []service.NodeSummary) int {
 		seen[n.EgressIP] = struct{}{}
 	}
 	return len(seen)
+}
+
+// parseOptionalIntQuery parses an optional integer query parameter within
+// [minValue, maxValue]. Returns nil when the parameter is absent.
+func parseOptionalIntQuery(
+	w http.ResponseWriter,
+	r *http.Request,
+	key string,
+	minValue int,
+	maxValue int,
+) (*int, bool) {
+	raw := strings.TrimSpace(r.URL.Query().Get(key))
+	if raw == "" {
+		return nil, true
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < minValue || value > maxValue {
+		writeInvalidArgument(w, fmt.Sprintf("%s: must be an integer between %d and %d", key, minValue, maxValue))
+		return nil, false
+	}
+	return &value, true
+}
+
+// parseIPInfoFilterQuery builds an IP profile filter from node list query
+// parameters. An empty filter is inactive and matches every node.
+func parseIPInfoFilterQuery(w http.ResponseWriter, r *http.Request) (platform.IPInfoFilter, bool) {
+	var filter platform.IPInfoFilter
+
+	minScore, ok := parseOptionalIntQuery(w, r, "min_fraud_score", 0, 100)
+	if !ok {
+		return platform.IPInfoFilter{}, false
+	}
+	maxScore, ok := parseOptionalIntQuery(w, r, "max_fraud_score", 0, 100)
+	if !ok {
+		return platform.IPInfoFilter{}, false
+	}
+	if minScore != nil && maxScore != nil && *minScore > *maxScore {
+		writeInvalidArgument(w, "min_fraud_score: must be <= max_fraud_score")
+		return platform.IPInfoFilter{}, false
+	}
+	filter.MinFraudScore = minScore
+	filter.MaxFraudScore = maxScore
+
+	if raw := strings.TrimSpace(r.URL.Query().Get("ip_type")); raw != "" {
+		usage := platform.IPUsage(strings.ToLower(raw))
+		switch usage {
+		case platform.IPUsageAny:
+		case platform.IPUsageResidential, platform.IPUsageHosting:
+			filter.IPType = usage
+		default:
+			writeInvalidArgument(w, "ip_type: must be any, residential, or hosting")
+			return platform.IPInfoFilter{}, false
+		}
+	}
+
+	if raw := strings.TrimSpace(r.URL.Query().Get("native")); raw != "" {
+		native := platform.IPNative(strings.ToLower(raw))
+		switch native {
+		case platform.IPNativeAny:
+		case platform.IPNativeNative, platform.IPNativeBroadcast:
+			filter.Native = native
+		default:
+			writeInvalidArgument(w, "native: must be any, native, or broadcast")
+			return platform.IPInfoFilter{}, false
+		}
+	}
+
+	// `asn` accepts a comma-separated list and may be repeated. Entries may
+	// carry an optional "AS" prefix; a leading "!" excludes the ASN.
+	for _, raw := range r.URL.Query()["asn"] {
+		for _, entry := range strings.Split(raw, ",") {
+			entry = strings.TrimSpace(entry)
+			if entry == "" {
+				continue
+			}
+			asn, exclude, err := platform.ParseASNFilterEntry(entry)
+			if err != nil {
+				writeInvalidArgument(w, "asn: "+err.Error())
+				return platform.IPInfoFilter{}, false
+			}
+			if exclude {
+				filter.ASNExcludes = append(filter.ASNExcludes, asn)
+				continue
+			}
+			filter.ASNIncludes = append(filter.ASNIncludes, asn)
+		}
+	}
+
+	return filter, true
 }
 
 // HandleListNodes returns a handler for GET /api/v1/nodes.
@@ -146,13 +253,25 @@ func HandleListNodes(cp *service.ControlPlaneService) http.HandlerFunc {
 			filters.ProbedSince = &t
 		}
 
+		ipInfoFilters, ok := parseIPInfoFilterQuery(w, r)
+		if !ok {
+			return
+		}
+		filters.IPInfoFilters = ipInfoFilters
+
+		hasIPInfo, ok := parseBoolQueryOrWriteInvalid(w, r, "has_ipinfo")
+		if !ok {
+			return
+		}
+		filters.HasIPInfo = hasIPInfo
+
 		nodes, err := cp.ListNodes(filters)
 		if err != nil {
 			writeServiceError(w, err)
 			return
 		}
 
-		sorting, ok := parseSortingOrWriteInvalid(w, r, []string{"tag", "created_at", "failure_count", "region"}, "tag", "asc")
+		sorting, ok := parseSortingOrWriteInvalid(w, r, []string{"tag", "created_at", "failure_count", "region", "fraud_score"}, "tag", "asc")
 		if !ok {
 			return
 		}

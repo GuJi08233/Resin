@@ -33,7 +33,9 @@ import {
   toPlatformCreateInput,
   type PlatformFormValues,
 } from "./formModel";
+import { countIPInfoFilterConditions } from "./formModel";
 import type { Platform } from "./types";
+import { IPInfoFilterEditor } from "./IPInfoFilterEditor";
 import { StatusCodeRuleEditor } from "./StatusCodeRuleEditor";
 import { allowsWarpSubscription, setWarpSubscriptionAllowed } from "./warpSubscription";
 
@@ -179,6 +181,7 @@ export function PlatformPage() {
           {platforms.map((platform) => {
             const regionCount = platform.region_filters.length;
             const regexCount = platform.regex_filters.length;
+            const ipInfoCount = countIPInfoFilterConditions(platform.ipinfo_filters);
             const stickyTTL = formatGoDuration(platform.sticky_ttl, t("默认"));
 
             return (
@@ -202,6 +205,10 @@ export function PlatformPage() {
                   <span className="platform-fact">
                     <span>{t("正则")}</span>
                     <strong>{regexCount}</strong>
+                  </span>
+                  <span className="platform-fact">
+                    <span>{t("IP 画像")}</span>
+                    <strong>{ipInfoCount}</strong>
                   </span>
                   <span className="platform-fact">
                     <span>{t("租约时长")}</span>
@@ -388,6 +395,8 @@ export function PlatformPage() {
                   {t("支持反选：以 ! 开头可排除地区（如 !hk）。可与正选混用，最终结果为“先正选再排除”。")}
                 </p>
               </div>
+
+              <IPInfoFilterEditor form={createForm} idPrefix="create" />
 
               <StatusCodeRuleEditor form={createForm} idPrefix="create" />
 

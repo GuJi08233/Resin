@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Resinat/Resin/internal/ipinfo"
 	"github.com/Resinat/Resin/internal/node"
 	"github.com/Resinat/Resin/internal/subscription"
 	"github.com/Resinat/Resin/internal/testutil"
@@ -199,5 +200,71 @@ func TestPreviewFilter_RegionNegation_UnknownRegionExcluded(t *testing.T) {
 		if node.NodeHash == fixture.unknownHash {
 			t.Fatalf("node with unknown region %s should not match region filters", fixture.unknownHash)
 		}
+	}
+}
+
+func TestPreviewFilter_IPInfoFilters(t *testing.T) {
+	fixture := buildPreviewFilterFixture(t)
+
+	hkHash, err := node.ParseHex(fixture.hkHash)
+	if err != nil {
+		t.Fatalf("parse hk hash: %v", err)
+	}
+	hkEntry, ok := fixture.cp.Pool.GetEntry(hkHash)
+	if !ok {
+		t.Fatal("hk entry missing")
+	}
+	hkEntry.SetEgressIPInfo(&ipinfo.Info{IP: "1.1.1.1", ASN: 64500, FraudScore: 10, IsResidential: true})
+
+	usHash, err := node.ParseHex(fixture.usHash)
+	if err != nil {
+		t.Fatalf("parse us hash: %v", err)
+	}
+	usEntry, ok := fixture.cp.Pool.GetEntry(usHash)
+	if !ok {
+		t.Fatal("us entry missing")
+	}
+	usEntry.SetEgressIPInfo(&ipinfo.Info{IP: "2.2.2.2", ASN: 64501, FraudScore: 80, IsBroadcast: true})
+
+	maxScore := 50
+	nodes, err := fixture.cp.PreviewFilter(PreviewFilterRequest{
+		PlatformSpec: &PlatformSpecFilter{
+			RegexFilters: []string{".*"},
+			IPInfoFilters: &IPInfoFilterRequest{
+				MaxFraudScore: &maxScore,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("PreviewFilter: %v", err)
+	}
+	if len(nodes) != 1 || nodes[0].NodeHash != fixture.hkHash {
+		t.Fatalf("max_fraud_score nodes = %+v, want only %s", nodes, fixture.hkHash)
+	}
+
+	nodes, err = fixture.cp.PreviewFilter(PreviewFilterRequest{
+		PlatformSpec: &PlatformSpecFilter{
+			RegexFilters: []string{".*"},
+			IPInfoFilters: &IPInfoFilterRequest{
+				IPType: "residential",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("PreviewFilter: %v", err)
+	}
+	if len(nodes) != 1 || nodes[0].NodeHash != fixture.hkHash {
+		t.Fatalf("residential nodes = %+v, want only %s", nodes, fixture.hkHash)
+	}
+
+	if _, err := fixture.cp.PreviewFilter(PreviewFilterRequest{
+		PlatformSpec: &PlatformSpecFilter{
+			RegexFilters: []string{".*"},
+			IPInfoFilters: &IPInfoFilterRequest{
+				IPType: "datacenter",
+			},
+		},
+	}); err == nil {
+		t.Fatal("expected invalid ip_type to be rejected")
 	}
 }

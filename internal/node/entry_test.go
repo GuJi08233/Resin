@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Resinat/Resin/internal/ipinfo"
 	"github.com/Resinat/Resin/internal/testutil"
 )
 
@@ -401,5 +402,32 @@ func TestNodeEntry_GetRegion_UsesStoredThenGeoIPFallback(t *testing.T) {
 	}
 	if geoLookupCalled {
 		t.Fatal("geo lookup should not be called when stored region exists")
+	}
+}
+
+func TestNodeEntry_GetRegion_FallsBackToIPInfoCountry(t *testing.T) {
+	e := NewNodeEntry(Hash{}, nil, time.Now(), 0)
+	e.SetEgressIP(netip.MustParseAddr("203.0.113.1"))
+
+	unresolved := func(netip.Addr) string { return "" }
+	if got := e.GetRegion(unresolved); got != "" {
+		t.Fatalf("region without GeoIP or profile: got %q, want empty", got)
+	}
+
+	e.SetEgressIPInfo(&ipinfo.Info{CountryCode: "JP"})
+	if got := e.GetRegion(unresolved); got != "jp" {
+		t.Fatalf("region from profile: got %q, want %q", got, "jp")
+	}
+
+	// An explicit probe region still wins over the profile country.
+	e.SetEgressRegion("us")
+	if got := e.GetRegion(unresolved); got != "us" {
+		t.Fatalf("stored region should win: got %q, want %q", got, "us")
+	}
+
+	// GeoIP wins over the profile when it resolves the address.
+	e.SetEgressRegion("")
+	if got := e.GetRegion(func(netip.Addr) string { return "hk" }); got != "hk" {
+		t.Fatalf("GeoIP should win over profile: got %q, want %q", got, "hk")
 	}
 }

@@ -62,8 +62,12 @@ export type PageResponse<T> = {
   unique_healthy_egress_ips: number;
 };
 
-export type NodeSortBy = "tag" | "created_at" | "failure_count" | "region";
+export type NodeSortBy = "tag" | "created_at" | "failure_count" | "region" | "fraud_score";
 export type SortOrder = "asc" | "desc";
+
+export type NodeIPTypeFilter = "any" | "residential" | "hosting";
+export type NodeNativeFilter = "any" | "native" | "broadcast";
+export type NodeIPInfoPresenceFilter = "all" | "with" | "without";
 
 export type NodeListFilters = {
   platform_id?: string;
@@ -75,6 +79,12 @@ export type NodeListFilters = {
   enabled?: boolean;
   circuit_open?: boolean;
   has_outbound?: boolean;
+  min_fraud_score?: number;
+  max_fraud_score?: number;
+  ip_type?: NodeIPTypeFilter;
+  native?: NodeNativeFilter;
+  asn?: string;
+  has_ipinfo?: boolean;
 };
 
 export type NodeListQuery = NodeListFilters & {

@@ -75,6 +75,20 @@ func decodePlatformStatusCodeRulesJSON(raw string) ([]model.PlatformStatusCodeRu
 	return out, nil
 }
 
+func decodePlatformIPInfoFilterJSON(raw string) (model.PlatformIPInfoFilter, error) {
+	if strings.TrimSpace(raw) == "" {
+		return model.PlatformIPInfoFilter{}, nil
+	}
+	var out model.PlatformIPInfoFilter
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return model.PlatformIPInfoFilter{}, err
+	}
+	if out.ASNs == nil {
+		out.ASNs = []string{}
+	}
+	return out, nil
+}
+
 // --- system_config ---
 
 // GetSystemConfig loads the runtime config and version from state.db.
@@ -178,21 +192,32 @@ func (r *StateRepo) UpsertPlatform(p model.Platform) error {
 	if err != nil {
 		return fmt.Errorf("encode platform %s status_code_rules: %w", p.ID, err)
 	}
+	normalizedIPInfoFilters, err := platform.NormalizeIPInfoFilter(p.IPInfoFilters)
+	if err != nil {
+		return err
+	}
+	p.IPInfoFilters = normalizedIPInfoFilters
+	ipInfoFiltersJSON, err := json.Marshal(p.IPInfoFilters)
+	if err != nil {
+		return fmt.Errorf("encode platform %s ipinfo_filters: %w", p.ID, err)
+	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	_, err = r.db.Exec(`
 		INSERT INTO platforms (id, name, sticky_ttl_ns, regex_filters_json, region_filters_json,
+		                       ipinfo_filters_json,
 		                       reverse_proxy_miss_action, reverse_proxy_empty_account_behavior,
 		                       reverse_proxy_fixed_account_header, allocation_policy,
 		                       passive_circuit_breaker_disabled, status_code_rules_json, updated_at_ns)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			name                     = excluded.name,
 			sticky_ttl_ns            = excluded.sticky_ttl_ns,
 			regex_filters_json       = excluded.regex_filters_json,
 			region_filters_json      = excluded.region_filters_json,
+			ipinfo_filters_json      = excluded.ipinfo_filters_json,
 			reverse_proxy_miss_action = excluded.reverse_proxy_miss_action,
 			reverse_proxy_empty_account_behavior = excluded.reverse_proxy_empty_account_behavior,
 			reverse_proxy_fixed_account_header   = excluded.reverse_proxy_fixed_account_header,
@@ -200,7 +225,7 @@ func (r *StateRepo) UpsertPlatform(p model.Platform) error {
 			passive_circuit_breaker_disabled = excluded.passive_circuit_breaker_disabled,
 			status_code_rules_json   = excluded.status_code_rules_json,
 			updated_at_ns            = excluded.updated_at_ns
-	`, p.ID, p.Name, p.StickyTTLNs, regexFiltersJSON, regionFiltersJSON,
+	`, p.ID, p.Name, p.StickyTTLNs, regexFiltersJSON, regionFiltersJSON, string(ipInfoFiltersJSON),
 		p.ReverseProxyMissAction, p.ReverseProxyEmptyAccountBehavior, p.ReverseProxyFixedAccountHeader,
 		p.AllocationPolicy, p.PassiveCircuitBreakerDisabled, statusCodeRulesJSON, p.UpdatedAtNs)
 	if err != nil {
@@ -265,16 +290,17 @@ func (r *StateRepo) GetPlatformName(id string) (string, error) {
 // GetPlatform returns one platform by ID.
 func (r *StateRepo) GetPlatform(id string) (*model.Platform, error) {
 	row := r.db.QueryRow(`SELECT id, name, sticky_ttl_ns, regex_filters_json, region_filters_json,
+			ipinfo_filters_json,
 			reverse_proxy_miss_action, reverse_proxy_empty_account_behavior,
 			reverse_proxy_fixed_account_header, allocation_policy,
 			passive_circuit_breaker_disabled, status_code_rules_json, updated_at_ns
 			FROM platforms WHERE id = ?`, id)
 
 	var p model.Platform
-	var regexFiltersJSON, regionFiltersJSON, statusCodeRulesJSON string
+	var regexFiltersJSON, regionFiltersJSON, ipInfoFiltersJSON, statusCodeRulesJSON string
 	var passiveCircuitBreakerDisabled int
 	if err := row.Scan(&p.ID, &p.Name, &p.StickyTTLNs, &regexFiltersJSON,
-		&regionFiltersJSON, &p.ReverseProxyMissAction, &p.ReverseProxyEmptyAccountBehavior,
+		&regionFiltersJSON, &ipInfoFiltersJSON, &p.ReverseProxyMissAction, &p.ReverseProxyEmptyAccountBehavior,
 		&p.ReverseProxyFixedAccountHeader, &p.AllocationPolicy, &passiveCircuitBreakerDisabled,
 		&statusCodeRulesJSON, &p.UpdatedAtNs); err != nil {
 		if err == sql.ErrNoRows {
@@ -291,19 +317,24 @@ func (r *StateRepo) GetPlatform(id string) (*model.Platform, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decode platform %s region_filters_json: %w", p.ID, err)
 	}
+	ipInfoFilters, err := decodePlatformIPInfoFilterJSON(ipInfoFiltersJSON)
+	if err != nil {
+		return nil, fmt.Errorf("decode platform %s ipinfo_filters_json: %w", p.ID, err)
+	}
 	statusCodeRules, err := decodePlatformStatusCodeRulesJSON(statusCodeRulesJSON)
 	if err != nil {
 		return nil, fmt.Errorf("decode platform %s status_code_rules_json: %w", p.ID, err)
 	}
 	p.RegexFilters = regexFilters
 	p.RegionFilters = regionFilters
+	p.IPInfoFilters = ipInfoFilters
 	p.StatusCodeRules = statusCodeRules
 	return &p, nil
 }
 
 // ListPlatforms returns all platforms.
 func (r *StateRepo) ListPlatforms() ([]model.Platform, error) {
-	rows, err := r.db.Query("SELECT id, name, sticky_ttl_ns, regex_filters_json, region_filters_json, reverse_proxy_miss_action, reverse_proxy_empty_account_behavior, reverse_proxy_fixed_account_header, allocation_policy, passive_circuit_breaker_disabled, status_code_rules_json, updated_at_ns FROM platforms")
+	rows, err := r.db.Query("SELECT id, name, sticky_ttl_ns, regex_filters_json, region_filters_json, ipinfo_filters_json, reverse_proxy_miss_action, reverse_proxy_empty_account_behavior, reverse_proxy_fixed_account_header, allocation_policy, passive_circuit_breaker_disabled, status_code_rules_json, updated_at_ns FROM platforms")
 	if err != nil {
 		return nil, err
 	}
@@ -312,10 +343,10 @@ func (r *StateRepo) ListPlatforms() ([]model.Platform, error) {
 	var result []model.Platform
 	for rows.Next() {
 		var p model.Platform
-		var regexFiltersJSON, regionFiltersJSON, statusCodeRulesJSON string
+		var regexFiltersJSON, regionFiltersJSON, ipInfoFiltersJSON, statusCodeRulesJSON string
 		var passiveCircuitBreakerDisabled int
 		if err := rows.Scan(&p.ID, &p.Name, &p.StickyTTLNs, &regexFiltersJSON,
-			&regionFiltersJSON, &p.ReverseProxyMissAction, &p.ReverseProxyEmptyAccountBehavior,
+			&regionFiltersJSON, &ipInfoFiltersJSON, &p.ReverseProxyMissAction, &p.ReverseProxyEmptyAccountBehavior,
 			&p.ReverseProxyFixedAccountHeader, &p.AllocationPolicy, &passiveCircuitBreakerDisabled,
 			&statusCodeRulesJSON, &p.UpdatedAtNs); err != nil {
 			return nil, err
@@ -329,12 +360,17 @@ func (r *StateRepo) ListPlatforms() ([]model.Platform, error) {
 		if err != nil {
 			return nil, fmt.Errorf("decode platform %s region_filters_json: %w", p.ID, err)
 		}
+		ipInfoFilters, err := decodePlatformIPInfoFilterJSON(ipInfoFiltersJSON)
+		if err != nil {
+			return nil, fmt.Errorf("decode platform %s ipinfo_filters_json: %w", p.ID, err)
+		}
 		statusCodeRules, err := decodePlatformStatusCodeRulesJSON(statusCodeRulesJSON)
 		if err != nil {
 			return nil, fmt.Errorf("decode platform %s status_code_rules_json: %w", p.ID, err)
 		}
 		p.RegexFilters = regexFilters
 		p.RegionFilters = regionFilters
+		p.IPInfoFilters = ipInfoFilters
 		p.StatusCodeRules = statusCodeRules
 		result = append(result, p)
 	}

@@ -19,12 +19,24 @@ export type PlatformExclusion = {
   expires_at: string | null;
 };
 
+export type PlatformIPType = "any" | "residential" | "hosting";
+export type PlatformNativeType = "any" | "native" | "broadcast";
+
+export type PlatformIPInfoFilters = {
+  min_fraud_score: number | null;
+  max_fraud_score: number | null;
+  ip_type: PlatformIPType;
+  native: PlatformNativeType;
+  asns: string[];
+};
+
 export type Platform = {
   id: string;
   name: string;
   sticky_ttl: string;
   regex_filters: string[];
   region_filters: string[];
+  ipinfo_filters: PlatformIPInfoFilters;
   routable_node_count: number;
   reverse_proxy_miss_action: PlatformMissAction;
   reverse_proxy_empty_account_behavior: PlatformEmptyAccountBehavior;
@@ -47,6 +59,7 @@ export type PlatformCreateInput = {
   sticky_ttl?: string;
   regex_filters?: string[];
   region_filters?: string[];
+  ipinfo_filters?: PlatformIPInfoFilters;
   reverse_proxy_miss_action?: PlatformMissAction;
   reverse_proxy_empty_account_behavior?: PlatformEmptyAccountBehavior;
   reverse_proxy_fixed_account_header?: string;
@@ -60,6 +73,7 @@ export type PlatformUpdateInput = {
   sticky_ttl?: string;
   regex_filters?: string[];
   region_filters?: string[];
+  ipinfo_filters?: PlatformIPInfoFilters;
   reverse_proxy_miss_action?: PlatformMissAction;
   reverse_proxy_empty_account_behavior?: PlatformEmptyAccountBehavior;
   reverse_proxy_fixed_account_header?: string;

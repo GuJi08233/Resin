@@ -10,6 +10,7 @@ type Platform struct {
 	StickyTTLNs                      int64  `json:"sticky_ttl_ns"`
 	RegexFilters                     []string
 	RegionFilters                    []string
+	IPInfoFilters                    PlatformIPInfoFilter
 	ReverseProxyMissAction           string                   `json:"reverse_proxy_miss_action"`
 	ReverseProxyEmptyAccountBehavior string                   `json:"reverse_proxy_empty_account_behavior"`
 	ReverseProxyFixedAccountHeader   string                   `json:"reverse_proxy_fixed_account_header"`
@@ -17,6 +18,18 @@ type Platform struct {
 	PassiveCircuitBreakerDisabled    bool                     `json:"passive_circuit_breaker_disabled"`
 	StatusCodeRules                  []PlatformStatusCodeRule `json:"status_code_rules"`
 	UpdatedAtNs                      int64                    `json:"updated_at_ns"`
+}
+
+// PlatformIPInfoFilter constrains platform routability by the node's IPPure
+// egress IP profile. Nil score bounds and empty type/native values mean
+// "no constraint". ASNs hold canonical entries without the "AS" prefix; a
+// leading "!" marks an exclusion.
+type PlatformIPInfoFilter struct {
+	MinFraudScore *int     `json:"min_fraud_score,omitempty"`
+	MaxFraudScore *int     `json:"max_fraud_score,omitempty"`
+	IPType        string   `json:"ip_type,omitempty"` // any | residential | hosting
+	Native        string   `json:"native,omitempty"`  // any | native | broadcast
+	ASNs          []string `json:"asns,omitempty"`
 }
 
 // PlatformStatusCodeRule maps an inclusive HTTP status code range to a

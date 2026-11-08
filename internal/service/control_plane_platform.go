@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +29,7 @@ type PlatformResponse struct {
 	StickyTTL                        string                   `json:"sticky_ttl"`
 	RegexFilters                     []string                 `json:"regex_filters"`
 	RegionFilters                    []string                 `json:"region_filters"`
+	IPInfoFilters                    IPInfoFilterResponse     `json:"ipinfo_filters"`
 	RoutableNodeCount                int                      `json:"routable_node_count"`
 	ReverseProxyMissAction           string                   `json:"reverse_proxy_miss_action"`
 	ReverseProxyEmptyAccountBehavior string                   `json:"reverse_proxy_empty_account_behavior"`
@@ -36,6 +38,35 @@ type PlatformResponse struct {
 	PassiveCircuitBreakerDisabled    bool                     `json:"passive_circuit_breaker_disabled"`
 	StatusCodeRules                  []StatusCodeRuleResponse `json:"status_code_rules"`
 	UpdatedAt                        string                   `json:"updated_at"`
+}
+
+// IPInfoFilterResponse is the API representation of the platform IP profile filter.
+type IPInfoFilterResponse struct {
+	MinFraudScore *int     `json:"min_fraud_score"`
+	MaxFraudScore *int     `json:"max_fraud_score"`
+	IPType        string   `json:"ip_type"`
+	Native        string   `json:"native"`
+	ASNs          []string `json:"asns"`
+}
+
+func ipInfoFiltersToResponse(filter model.PlatformIPInfoFilter) IPInfoFilterResponse {
+	resp := IPInfoFilterResponse{
+		MinFraudScore: filter.MinFraudScore,
+		MaxFraudScore: filter.MaxFraudScore,
+		IPType:        filter.IPType,
+		Native:        filter.Native,
+		ASNs:          append([]string(nil), filter.ASNs...),
+	}
+	if resp.IPType == "" {
+		resp.IPType = string(platform.IPUsageAny)
+	}
+	if resp.Native == "" {
+		resp.Native = string(platform.IPNativeAny)
+	}
+	if resp.ASNs == nil {
+		resp.ASNs = []string{}
+	}
+	return resp
 }
 
 // StatusCodeRuleResponse is the API representation of one status code rule.
@@ -71,6 +102,7 @@ func platformToResponse(p model.Platform) PlatformResponse {
 		StickyTTL:                        time.Duration(p.StickyTTLNs).String(),
 		RegexFilters:                     append([]string(nil), p.RegexFilters...),
 		RegionFilters:                    append([]string(nil), p.RegionFilters...),
+		IPInfoFilters:                    ipInfoFiltersToResponse(p.IPInfoFilters),
 		RoutableNodeCount:                0,
 		ReverseProxyMissAction:           p.ReverseProxyMissAction,
 		ReverseProxyEmptyAccountBehavior: behavior,
@@ -99,6 +131,7 @@ type platformConfig struct {
 	StickyTTLNs                      int64
 	RegexFilters                     []string
 	RegionFilters                    []string
+	IPInfoFilters                    model.PlatformIPInfoFilter
 	ReverseProxyMissAction           string
 	ReverseProxyEmptyAccountBehavior string
 	ReverseProxyFixedAccountHeader   string
@@ -136,6 +169,7 @@ func (s *ControlPlaneService) defaultPlatformConfig(name string) platformConfig 
 			s.EnvCfg.DefaultPlatformReverseProxyFixedAccountHeader,
 		),
 		AllocationPolicy: s.EnvCfg.DefaultPlatformAllocationPolicy,
+		IPInfoFilters:    model.PlatformIPInfoFilter{ASNs: []string{}},
 		StatusCodeRules:  []platform.StatusCodeRule{},
 	}
 }
@@ -150,6 +184,7 @@ func platformConfigFromModel(mp model.Platform) (platformConfig, error) {
 		StickyTTLNs:                      mp.StickyTTLNs,
 		RegexFilters:                     append([]string(nil), mp.RegexFilters...),
 		RegionFilters:                    append([]string(nil), mp.RegionFilters...),
+		IPInfoFilters:                    mp.IPInfoFilters,
 		ReverseProxyMissAction:           mp.ReverseProxyMissAction,
 		ReverseProxyEmptyAccountBehavior: normalizePlatformEmptyAccountBehavior(mp.ReverseProxyEmptyAccountBehavior),
 		ReverseProxyFixedAccountHeader:   normalizeHeaderFieldName(mp.ReverseProxyFixedAccountHeader),
@@ -166,6 +201,7 @@ func (cfg platformConfig) toModel(id string, updatedAtNs int64) model.Platform {
 		StickyTTLNs:                      cfg.StickyTTLNs,
 		RegexFilters:                     append([]string(nil), cfg.RegexFilters...),
 		RegionFilters:                    append([]string(nil), cfg.RegionFilters...),
+		IPInfoFilters:                    cfg.IPInfoFilters,
 		ReverseProxyMissAction:           cfg.ReverseProxyMissAction,
 		ReverseProxyEmptyAccountBehavior: cfg.ReverseProxyEmptyAccountBehavior,
 		ReverseProxyFixedAccountHeader:   cfg.ReverseProxyFixedAccountHeader,
@@ -181,6 +217,10 @@ func (cfg platformConfig) toRuntime(id string) (*platform.Platform, error) {
 	if err != nil {
 		return nil, err
 	}
+	compiledIPInfoFilters, err := platform.CompileIPInfoFilter(cfg.IPInfoFilters)
+	if err != nil {
+		return nil, err
+	}
 	plat := platform.NewConfiguredPlatform(
 		id,
 		cfg.Name,
@@ -193,6 +233,7 @@ func (cfg platformConfig) toRuntime(id string) (*platform.Platform, error) {
 		cfg.AllocationPolicy,
 		cfg.PassiveCircuitBreakerDisabled,
 	)
+	plat.IPInfoFilters = compiledIPInfoFilters
 	plat.StatusCodeRules = append([]platform.StatusCodeRule(nil), cfg.StatusCodeRules...)
 	return plat, nil
 }
@@ -299,6 +340,11 @@ func validatePlatformConfig(cfg *platformConfig, validateRegionFilters bool) *Se
 			return invalidArg(err.Error())
 		}
 	}
+	normalizedIPInfoFilters, err := platform.NormalizeIPInfoFilter(cfg.IPInfoFilters)
+	if err != nil {
+		return invalidArg(err.Error())
+	}
+	cfg.IPInfoFilters = normalizedIPInfoFilters
 	if err := validatePlatformEmptyAccountConfig(cfg); err != nil {
 		return err
 	}
@@ -405,12 +451,54 @@ type CreatePlatformRequest struct {
 	StickyTTL                        *string                 `json:"sticky_ttl"`
 	RegexFilters                     []string                `json:"regex_filters"`
 	RegionFilters                    []string                `json:"region_filters"`
+	IPInfoFilters                    *IPInfoFilterRequest    `json:"ipinfo_filters"`
 	ReverseProxyMissAction           *string                 `json:"reverse_proxy_miss_action"`
 	ReverseProxyEmptyAccountBehavior *string                 `json:"reverse_proxy_empty_account_behavior"`
 	ReverseProxyFixedAccountHeader   *string                 `json:"reverse_proxy_fixed_account_header"`
 	AllocationPolicy                 *string                 `json:"allocation_policy"`
 	PassiveCircuitBreakerDisabled    *bool                   `json:"passive_circuit_breaker_disabled"`
 	StatusCodeRules                  []StatusCodeRuleRequest `json:"status_code_rules"`
+}
+
+// IPInfoFilterRequest is the API input shape for the platform IP profile filter.
+type IPInfoFilterRequest struct {
+	MinFraudScore *int     `json:"min_fraud_score"`
+	MaxFraudScore *int     `json:"max_fraud_score"`
+	IPType        string   `json:"ip_type"`
+	Native        string   `json:"native"`
+	ASNs          []string `json:"asns"`
+}
+
+func (r IPInfoFilterRequest) toModel() model.PlatformIPInfoFilter {
+	asns := append([]string(nil), r.ASNs...)
+	if asns == nil {
+		asns = []string{}
+	}
+	return model.PlatformIPInfoFilter{
+		MinFraudScore: r.MinFraudScore,
+		MaxFraudScore: r.MaxFraudScore,
+		IPType:        r.IPType,
+		Native:        r.Native,
+		ASNs:          asns,
+	}
+}
+
+func (p mergePatch) optionalIPInfoFilterRequest(field string) (IPInfoFilterRequest, bool, *ServiceError) {
+	raw, ok := p[field]
+	if !ok {
+		return IPInfoFilterRequest{}, false, nil
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return IPInfoFilterRequest{}, true, invalidArg(fmt.Sprintf("%s: invalid value", field))
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	var filter IPInfoFilterRequest
+	if err := dec.Decode(&filter); err != nil {
+		return IPInfoFilterRequest{}, true, invalidArg(fmt.Sprintf("%s: %v", field, err))
+	}
+	return filter, true, nil
 }
 
 // CreatePlatform creates a new platform.
@@ -446,6 +534,9 @@ func (s *ControlPlaneService) CreatePlatform(req CreatePlatformRequest) (*Platfo
 	}
 	if req.RegionFilters != nil {
 		cfg.RegionFilters = req.RegionFilters
+	}
+	if req.IPInfoFilters != nil {
+		cfg.IPInfoFilters = req.IPInfoFilters.toModel()
 	}
 	if req.ReverseProxyMissAction != nil {
 		if err := setPlatformMissAction(&cfg, *req.ReverseProxyMissAction); err != nil {
@@ -561,6 +652,12 @@ func (s *ControlPlaneService) UpdatePlatform(id string, patchJSON json.RawMessag
 	} else if ok {
 		regionFiltersPatched = true
 		cfg.RegionFilters = filters
+	}
+
+	if filters, ok, err := patch.optionalIPInfoFilterRequest("ipinfo_filters"); err != nil {
+		return nil, err
+	} else if ok {
+		cfg.IPInfoFilters = filters.toModel()
 	}
 
 	if ma, ok, err := patch.optionalString("reverse_proxy_miss_action"); err != nil {
@@ -733,8 +830,9 @@ type PreviewFilterRequest struct {
 }
 
 type PlatformSpecFilter struct {
-	RegexFilters  []string `json:"regex_filters"`
-	RegionFilters []string `json:"region_filters"`
+	RegexFilters  []string             `json:"regex_filters"`
+	RegionFilters []string             `json:"region_filters"`
+	IPInfoFilters *IPInfoFilterRequest `json:"ipinfo_filters"`
 }
 
 // NodeSummary is the API response for a node.
@@ -869,6 +967,7 @@ func (s *ControlPlaneService) PreviewFilter(req PreviewFilterRequest) ([]NodeSum
 
 	var regexFilters node.TagFilter
 	var regionFilters []string
+	var ipInfoFilters platform.IPInfoFilter
 
 	if hasPlatformID {
 		plat, ok := s.Pool.GetPlatform(*req.PlatformID)
@@ -877,6 +976,7 @@ func (s *ControlPlaneService) PreviewFilter(req PreviewFilterRequest) ([]NodeSum
 		}
 		regexFilters = plat.RegexFilters
 		regionFilters = plat.RegionFilters
+		ipInfoFilters = plat.IPInfoFilters
 	} else {
 		compiled, err := platform.CompileRegexFilters(req.PlatformSpec.RegexFilters)
 		if err != nil {
@@ -886,6 +986,13 @@ func (s *ControlPlaneService) PreviewFilter(req PreviewFilterRequest) ([]NodeSum
 		regionFilters = req.PlatformSpec.RegionFilters
 		if err := platform.ValidateRegionFilters(regionFilters); err != nil {
 			return nil, invalidArg(err.Error())
+		}
+		if req.PlatformSpec.IPInfoFilters != nil {
+			compiledIPInfo, err := platform.CompileIPInfoFilter(req.PlatformSpec.IPInfoFilters.toModel())
+			if err != nil {
+				return nil, invalidArg(err.Error())
+			}
+			ipInfoFilters = compiledIPInfo
 		}
 	}
 
@@ -906,6 +1013,9 @@ func (s *ControlPlaneService) PreviewFilter(req PreviewFilterRequest) ([]NodeSum
 			if !platform.MatchRegionFilter(region, regionFilters) {
 				return true
 			}
+		}
+		if !ipInfoFilters.Match(entry.GetEgressIPInfo()) {
+			return true
 		}
 		result = append(result, s.nodeEntryToSummary(h, entry))
 		return true

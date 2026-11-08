@@ -2064,3 +2064,117 @@ func TestAPIContract_MetricsEndpoints(t *testing.T) {
 	}
 	assertErrorCode(t, rec, "INVALID_ARGUMENT")
 }
+
+func TestAPIContract_PlatformIPInfoFilters(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	rec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/platforms", map[string]any{
+		"name": "Profile-Route",
+		"ipinfo_filters": map[string]any{
+			"min_fraud_score": 5,
+			"max_fraud_score": 50,
+			"ip_type":         "residential",
+			"native":          "native",
+			"asns":            []string{"AS64500", "!64501"},
+		},
+	}, true)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create platform status: got %d, want %d, body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	body := decodeJSONMap(t, rec)
+	filters, ok := body["ipinfo_filters"].(map[string]any)
+	if !ok {
+		t.Fatalf("ipinfo_filters missing: %T body=%s", body["ipinfo_filters"], rec.Body.String())
+	}
+	if filters["min_fraud_score"] != float64(5) || filters["max_fraud_score"] != float64(50) {
+		t.Fatalf("score bounds: %+v", filters)
+	}
+	if filters["ip_type"] != "residential" || filters["native"] != "native" {
+		t.Fatalf("type/native: %+v", filters)
+	}
+	asns, ok := filters["asns"].([]any)
+	if !ok || len(asns) != 2 || asns[0] != "64500" || asns[1] != "!64501" {
+		t.Fatalf("asns: %+v", filters["asns"])
+	}
+
+	platformID := body["id"].(string)
+
+	// PATCH the filter and verify the stored platform is rebuilt.
+	rec = doJSONRequest(t, srv, http.MethodPatch, "/api/v1/platforms/"+platformID, map[string]any{
+		"ipinfo_filters": map[string]any{
+			"max_fraud_score": 20,
+			"ip_type":         "any",
+			"native":          "any",
+			"asns":            []string{},
+		},
+	}, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch platform status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body = decodeJSONMap(t, rec)
+	filters = body["ipinfo_filters"].(map[string]any)
+	if filters["min_fraud_score"] != nil {
+		t.Fatalf("min_fraud_score should be cleared, got %v", filters["min_fraud_score"])
+	}
+	if filters["max_fraud_score"] != float64(20) || filters["ip_type"] != "any" || filters["native"] != "any" {
+		t.Fatalf("patched filters: %+v", filters)
+	}
+	if asns, _ := filters["asns"].([]any); len(asns) != 0 {
+		t.Fatalf("patched asns should be empty, got %+v", filters["asns"])
+	}
+
+	plat, ok := cp.Pool.GetPlatform(platformID)
+	if !ok {
+		t.Fatalf("platform %s missing from pool", platformID)
+	}
+	if plat.IPInfoFilters.MaxFraudScore == nil || *plat.IPInfoFilters.MaxFraudScore != 20 {
+		t.Fatalf("runtime max score = %v", plat.IPInfoFilters.MaxFraudScore)
+	}
+	if len(plat.IPInfoFilters.ASNIncludes) != 0 || len(plat.IPInfoFilters.ASNExcludes) != 0 {
+		t.Fatalf("runtime ASNs should be cleared: %+v", plat.IPInfoFilters)
+	}
+}
+
+func TestAPIContract_PlatformIPInfoFilters_Invalid(t *testing.T) {
+	srv, _, _ := newControlPlaneTestServer(t)
+
+	cases := []struct {
+		name string
+		body map[string]any
+		hint string
+	}{
+		{
+			name: "score out of range",
+			body: map[string]any{"ipinfo_filters": map[string]any{"max_fraud_score": 101}},
+			hint: "ipinfo_filters",
+		},
+		{
+			name: "min greater than max",
+			body: map[string]any{"ipinfo_filters": map[string]any{"min_fraud_score": 60, "max_fraud_score": 40}},
+			hint: "ipinfo_filters",
+		},
+		{
+			name: "invalid ip type",
+			body: map[string]any{"ipinfo_filters": map[string]any{"ip_type": "datacenter"}},
+			hint: "ipinfo_filters",
+		},
+		{
+			name: "unknown nested field",
+			body: map[string]any{"ipinfo_filters": map[string]any{"unknown": true}},
+			hint: "unknown",
+		},
+	}
+	for _, tc := range cases {
+		tc.body["name"] = "Bad-" + strings.ReplaceAll(tc.name, " ", "-")
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/platforms", tc.body, true)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status: got %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+			}
+			assertErrorCode(t, rec, "INVALID_ARGUMENT")
+			if !strings.Contains(rec.Body.String(), tc.hint) {
+				t.Fatalf("body %q should mention %q", rec.Body.String(), tc.hint)
+			}
+		})
+	}
+}

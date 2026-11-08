@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Resinat/Resin/internal/ipinfo"
 	"github.com/Resinat/Resin/internal/node"
 	"github.com/Resinat/Resin/internal/platform"
 	"github.com/Resinat/Resin/internal/subscription"
@@ -948,5 +949,62 @@ func TestEphemeralCleaner_SkipsRecentCircuitBreak(t *testing.T) {
 	// Should NOT be evicted yet.
 	if pool.Size() != 1 {
 		t.Fatal("recently circuit-broken node should not be evicted yet")
+	}
+}
+
+func TestPool_UpdateNodeIPInfo_ReevaluatesPlatforms(t *testing.T) {
+	subMgr := NewSubscriptionManager()
+	sub := subscription.NewSubscription("s1", "Sub1", "url", true, false)
+	subMgr.Register(sub)
+
+	pool := newTestPool(subMgr)
+
+	plat := platform.NewPlatform("p-ipinfo", "IPInfo", nil, nil)
+	maxScore := 50
+	plat.IPInfoFilters = platform.IPInfoFilter{MaxFraudScore: &maxScore}
+	pool.RegisterPlatform(plat)
+
+	raw := json.RawMessage(`{"type":"ss","server":"1.1.1.1"}`)
+	h := node.HashFromRawOptions(raw)
+
+	mn := subscription.NewManagedNodes()
+	mn.StoreNode(h, subscription.ManagedNode{Tags: []string{"us-node"}})
+	sub.SwapManagedNodes(mn)
+
+	pool.AddNodeFromSub(h, raw, "s1")
+	entry, ok := pool.GetEntry(h)
+	if !ok {
+		t.Fatal("entry not found")
+	}
+	entry.LatencyTable.LoadEntry("example.com", node.DomainLatencyStats{
+		Ewma:        100 * time.Millisecond,
+		LastUpdated: time.Now(),
+	})
+	ob := testutil.NewNoopOutbound()
+	entry.Outbound.Store(&ob)
+	entry.SetEgressIP(netip.MustParseAddr("1.2.3.4"))
+	pool.RecordResult(h, true)
+	pool.NotifyNodeDirty(h)
+
+	if plat.View().Contains(h) {
+		t.Fatal("node without a profile should not be routable under an active IP profile filter")
+	}
+
+	// A failing profile (score above the ceiling) must not change the view.
+	pool.UpdateNodeIPInfo(h, &ipinfo.Info{IP: "1.2.3.4", FraudScore: 90})
+	if plat.View().Contains(h) {
+		t.Fatal("node above the fraud score ceiling should not be routable")
+	}
+
+	// A passing profile must add the node.
+	pool.UpdateNodeIPInfo(h, &ipinfo.Info{IP: "1.2.3.4", FraudScore: 10})
+	if !plat.View().Contains(h) {
+		t.Fatal("node within the fraud score ceiling should become routable")
+	}
+
+	// Reprobing the same profile must keep it routable.
+	pool.UpdateNodeIPInfo(h, &ipinfo.Info{IP: "1.2.3.4", FraudScore: 10})
+	if !plat.View().Contains(h) {
+		t.Fatal("node should stay routable after a repeated identical probe")
 	}
 }

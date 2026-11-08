@@ -30,7 +30,8 @@ const (
 	stateVersionPlatformRegexFilterRules         = 9
 	stateVersionAddPlatformStatusCodeRules       = 10
 	stateVersionAddPlatformEgressExclusions      = 11
-	stateLatestVersion                           = stateVersionAddPlatformEgressExclusions
+	stateVersionAddPlatformIPInfoFilters         = 12
+	stateLatestVersion                           = stateVersionAddPlatformIPInfoFilters
 	stateLegacyBaselineVersion                   = stateVersionAddFixedAccountHeader
 
 	stateBaseSchemaMigration = stateMigrationsPath + "/000001_state_base.up.sql"

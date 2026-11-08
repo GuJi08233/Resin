@@ -21,7 +21,14 @@ import { listSubscriptions } from "../subscriptions/api";
 import { getNode, listNodes, probeEgress, probeIPInfo, probeLatency } from "./api";
 import type { NodeIPInfo, NodeSummary } from "./types";
 import { getAllRegions, getRegionName } from "./regions";
-import type { NodeListFilters, NodeSortBy, SortOrder } from "./types";
+import type {
+  NodeIPInfoPresenceFilter,
+  NodeIPTypeFilter,
+  NodeListFilters,
+  NodeNativeFilter,
+  NodeSortBy,
+  SortOrder,
+} from "./types";
 
 type NodeStatusFilter = "all" | "healthy" | "circuit_open" | "error" | "disabled";
 type NodeDisplayStatus = "healthy" | "circuit_open" | "pending_test" | "error" | "disabled";
@@ -34,6 +41,12 @@ type NodeFilterDraft = {
   region: string;
   egress_ip: string;
   status: NodeStatusFilter;
+  ip_type: NodeIPTypeFilter;
+  native: NodeNativeFilter;
+  ipinfo_presence: NodeIPInfoPresenceFilter;
+  min_fraud_score: string;
+  max_fraud_score: string;
+  asn: string;
 };
 
 const defaultFilterDraft: NodeFilterDraft = {
@@ -43,7 +56,35 @@ const defaultFilterDraft: NodeFilterDraft = {
   region: "",
   egress_ip: "",
   status: "all",
+  ip_type: "any",
+  native: "any",
+  ipinfo_presence: "all",
+  min_fraud_score: "",
+  max_fraud_score: "",
+  asn: "",
 };
+
+function parseIPTypeParam(value: string | null): NodeIPTypeFilter {
+  return value === "residential" || value === "hosting" ? value : "any";
+}
+
+function parseNativeParam(value: string | null): NodeNativeFilter {
+  return value === "native" || value === "broadcast" ? value : "any";
+}
+
+// parseScoreInput keeps only a valid 0-100 integer string; anything else is
+// dropped so the UI never sends an invalid filter.
+function parseScoreInput(raw: string): number | undefined {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  const value = Number(trimmed);
+  if (!Number.isInteger(value) || value < 0 || value > 100) {
+    return undefined;
+  }
+  return value;
+}
 
 const PAGE_SIZE_OPTIONS = [20, 50, 100, 200, 500, 1000, 2000, 5000] as const;
 const EMPTY_PLATFORMS: Platform[] = [];
@@ -133,6 +174,17 @@ function draftFromQuery(search: string): NodeFilterDraft {
     region: trimQueryValue(params, "region").toUpperCase(),
     egress_ip: trimQueryValue(params, "egress_ip"),
     status: statusFromQuery(params),
+    ip_type: parseIPTypeParam(params.get("ip_type")),
+    native: parseNativeParam(params.get("native")),
+    ipinfo_presence:
+      parseBoolParam(params.get("has_ipinfo")) === true
+        ? "with"
+        : parseBoolParam(params.get("has_ipinfo")) === false
+          ? "without"
+          : "all",
+    min_fraud_score: trimQueryValue(params, "min_fraud_score"),
+    max_fraud_score: trimQueryValue(params, "max_fraud_score"),
+    asn: trimQueryValue(params, "asn"),
   };
 }
 
@@ -166,6 +218,13 @@ function draftToActiveFilters(draft: NodeFilterDraft): NodeListFilters {
       break;
   }
 
+  let has_ipinfo: boolean | undefined = undefined;
+  if (draft.ipinfo_presence === "with") {
+    has_ipinfo = true;
+  } else if (draft.ipinfo_presence === "without") {
+    has_ipinfo = false;
+  }
+
   return {
     platform_id: draft.platform_id,
     subscription_id: draft.subscription_id,
@@ -175,6 +234,12 @@ function draftToActiveFilters(draft: NodeFilterDraft): NodeListFilters {
     enabled,
     circuit_open,
     has_outbound,
+    ip_type: draft.ip_type === "any" ? undefined : draft.ip_type,
+    native: draft.native === "any" ? undefined : draft.native,
+    min_fraud_score: parseScoreInput(draft.min_fraud_score),
+    max_fraud_score: parseScoreInput(draft.max_fraud_score),
+    asn: draft.asn.trim() || undefined,
+    has_ipinfo,
   };
 }
 
@@ -644,7 +709,12 @@ export function NodesPage() {
     }),
     col.display({
       id: "ipinfo",
-      header: t("IP 属性"),
+      header: () => (
+        <button type="button" className="table-sort-btn" onClick={() => changeSort("fraud_score")}>
+          {t("IP 属性")}
+          <span>{sortIndicator(sortBy === "fraud_score", sortOrder)}</span>
+        </button>
+      ),
       cell: (info) => {
         const node = info.row.original;
         if (!node.ipinfo) {
@@ -905,6 +975,97 @@ export function NodesPage() {
                 <option value="error">{t("错误")}</option>
                 <option value="disabled">{t("禁用")}</option>
               </Select>
+            </div>
+
+            <div style={NODE_FILTER_ITEM_STYLE}>
+              <label htmlFor="node-ip-type" style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+                {t("IP 类型")}
+              </label>
+              <Select
+                id="node-ip-type"
+                value={draftFilters.ip_type}
+                onChange={(event) => handleFilterChange("ip_type", event.target.value)}
+                style={NODE_FILTER_CONTROL_STYLE}
+              >
+                <option value="any">{t("全部")}</option>
+                <option value="residential">{t("住宅 IP")}</option>
+                <option value="hosting">{t("机房 IP")}</option>
+              </Select>
+            </div>
+
+            <div style={NODE_FILTER_ITEM_STYLE}>
+              <label htmlFor="node-native" style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+                {t("原生属性")}
+              </label>
+              <Select
+                id="node-native"
+                value={draftFilters.native}
+                onChange={(event) => handleFilterChange("native", event.target.value)}
+                style={NODE_FILTER_CONTROL_STYLE}
+              >
+                <option value="any">{t("全部")}</option>
+                <option value="native">{t("原生 IP")}</option>
+                <option value="broadcast">{t("广播 IP")}</option>
+              </Select>
+            </div>
+
+            <div style={NODE_FILTER_ITEM_STYLE}>
+              <label htmlFor="node-ipinfo-presence" style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+                {t("画像状态")}
+              </label>
+              <Select
+                id="node-ipinfo-presence"
+                value={draftFilters.ipinfo_presence}
+                onChange={(event) => handleFilterChange("ipinfo_presence", event.target.value)}
+                style={NODE_FILTER_CONTROL_STYLE}
+              >
+                <option value="all">{t("全部")}</option>
+                <option value="with">{t("已探测")}</option>
+                <option value="without">{t("未探测")}</option>
+              </Select>
+            </div>
+
+            <div style={NODE_FILTER_ITEM_STYLE}>
+              <label htmlFor="node-fraud-score" style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+                {t("风险分")}
+              </label>
+              <div style={{ display: "flex", alignItems: "center", gap: "0.25rem" }}>
+                <Input
+                  id="node-fraud-score"
+                  type="number"
+                  min={0}
+                  max={100}
+                  placeholder={t("最小")}
+                  value={draftFilters.min_fraud_score}
+                  onChange={(event) => handleFilterChange("min_fraud_score", event.target.value)}
+                  style={NODE_FILTER_CONTROL_STYLE}
+                  aria-label={t("最小风险分")}
+                />
+                <span style={{ color: "var(--text-secondary)" }}>~</span>
+                <Input
+                  type="number"
+                  min={0}
+                  max={100}
+                  placeholder={t("最大")}
+                  value={draftFilters.max_fraud_score}
+                  onChange={(event) => handleFilterChange("max_fraud_score", event.target.value)}
+                  style={NODE_FILTER_CONTROL_STYLE}
+                  aria-label={t("最大风险分")}
+                />
+              </div>
+            </div>
+
+            <div style={NODE_FILTER_ITEM_STYLE}>
+              <label htmlFor="node-asn" style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+                {t("ASN")}
+              </label>
+              <Input
+                id="node-asn"
+                value={draftFilters.asn}
+                onChange={(event) => handleFilterChange("asn", event.target.value)}
+                placeholder={t("如 132203 / !4134")}
+                style={NODE_FILTER_CONTROL_STYLE}
+              />
             </div>
 
             <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.125rem", marginLeft: "auto" }}>

@@ -855,6 +855,30 @@ Note: Once enabled, requests without authentication information are rejected ins
     "When enabled, Resin queries the public IPPure endpoint through each node to collect the egress IP's location, ASN, risk score, and purity. Disabling it still allows one-off probes from node details.",
   "IP 画像探测接口不能为空": "IP profile probe endpoint must not be empty",
   "IP 画像探测接口必须是 http/https 地址": "IP profile probe endpoint must be an http/https URL",
+  "IP 画像过滤（可选）": "IP profile filters (optional)",
+  "依据节点最近一次 IP 画像探测的结果筛选出口。启用任一条件后，尚未探测过画像的节点不会被此平台路由。":
+    "Filter exits by the node's latest IP profile probe. Once any condition is set, nodes without a profile are no longer routed by this platform.",
+  "最小风险分": "Minimum risk score",
+  "最大风险分": "Maximum risk score",
+  "留空表示不限": "Leave empty for no limit",
+  "原生属性": "Native type",
+  "ASN 白名单 / 黑名单（每行一个）": "ASN allow / deny list (one per line)",
+  "每行一个 ASN，例如：\n\nAS132203\n64500\n!4134\n\n不带 ! 表示仅允许这些 ASN，! 开头表示排除。":
+    "One ASN per line, e.g.\n\nAS132203\n64500\n!4134\n\nEntries without ! form an allow list; a leading ! excludes the ASN.",
+  "可省略 AS 前缀。白名单与黑名单可混用，同一个 ASN 不能同时出现在两侧。":
+    "The AS prefix is optional. Allow and deny entries can be mixed, but the same ASN cannot appear on both sides.",
+  "风险分必须是 0 到 100 之间的整数": "Risk score must be an integer between 0 and 100",
+  "最小风险分不能大于最大风险分": "Minimum risk score must not exceed the maximum",
+  "ASN 格式无效（支持 64500、AS64500、!64500）": "Invalid ASN format (use 64500, AS64500, or !64500)",
+  "IP 画像过滤": "IP profile filters",
+  "IP 类型": "IP type",
+  "画像状态": "Profile status",
+  "已探测": "Probed",
+  "未探测": "Not probed",
+  "风险分": "Risk score",
+  "最小": "Min",
+  "最大": "Max",
+  "如 132203 / !4134": "e.g. 132203 / !4134",
 };
 
 export function translateDocumentTitle(locale: AppLocale): string {

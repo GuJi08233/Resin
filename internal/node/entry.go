@@ -296,19 +296,25 @@ func (e *NodeEntry) SetEgressRegion(region string) {
 }
 
 // GetRegion resolves a node region using explicit probe metadata first,
-// then GeoIP fallback from egress IP.
+// then GeoIP lookup from the egress IP, then the last IPPure sample's country
+// code. The IPPure fallback keeps region filters working when GeoIP is not
+// installed or cannot resolve the address.
 func (e *NodeEntry) GetRegion(geoLookup func(netip.Addr) string) string {
 	if region := e.GetEgressRegion(); region != "" {
 		return region
 	}
-	if geoLookup == nil {
-		return ""
+	if geoLookup != nil {
+		egressIP := e.GetEgressIP()
+		if egressIP.IsValid() {
+			if region := geoLookup(egressIP); region != "" {
+				return region
+			}
+		}
 	}
-	egressIP := e.GetEgressIP()
-	if !egressIP.IsValid() {
-		return ""
+	if info := e.GetEgressIPInfo(); info != nil {
+		return strings.ToLower(strings.TrimSpace(info.CountryCode))
 	}
-	return geoLookup(egressIP)
+	return ""
 }
 
 // GetEgressIPInfo returns a copy of the node's last IPPure reputation sample,

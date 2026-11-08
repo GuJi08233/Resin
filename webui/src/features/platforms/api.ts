@@ -5,6 +5,7 @@ import type {
   Platform,
   PlatformCreateInput,
   PlatformExclusion,
+  PlatformIPInfoFilters,
   PlatformLease,
   PlatformStatusCodeRule,
   PlatformUpdateInput,
@@ -12,9 +13,10 @@ import type {
 
 const basePath = "/api/v1/platforms";
 
-type ApiPlatform = Omit<Platform, "regex_filters" | "region_filters" | "status_code_rules"> & {
+type ApiPlatform = Omit<Platform, "regex_filters" | "region_filters" | "ipinfo_filters" | "status_code_rules"> & {
   regex_filters?: string[] | null;
   region_filters?: string[] | null;
+  ipinfo_filters?: Partial<PlatformIPInfoFilters> | null;
   routable_node_count?: number | null;
   reverse_proxy_miss_action?: Platform["reverse_proxy_miss_action"] | null;
   reverse_proxy_empty_account_behavior?: Platform["reverse_proxy_empty_account_behavior"] | null;
@@ -62,12 +64,38 @@ function normalizeStatusCodeRules(raw: ApiPlatform["status_code_rules"]): Platfo
   return result;
 }
 
+export function normalizeIPInfoFilters(
+  raw: Partial<PlatformIPInfoFilters> | null | undefined,
+): PlatformIPInfoFilters {
+  const toScore = (value: unknown): number | null => {
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      return null;
+    }
+    const rounded = Math.trunc(value);
+    if (rounded < 0 || rounded > 100) {
+      return null;
+    }
+    return rounded;
+  };
+  return {
+    min_fraud_score: toScore(raw?.min_fraud_score),
+    max_fraud_score: toScore(raw?.max_fraud_score),
+    ip_type:
+      raw?.ip_type === "residential" || raw?.ip_type === "hosting" ? raw.ip_type : "any",
+    native: raw?.native === "native" || raw?.native === "broadcast" ? raw.native : "any",
+    asns: Array.isArray(raw?.asns)
+      ? raw.asns.filter((item): item is string => typeof item === "string")
+      : [],
+  };
+}
+
 function normalizePlatform(raw: ApiPlatform): Platform {
   return {
     ...raw,
     reverse_proxy_miss_action: parseMissAction(raw.reverse_proxy_miss_action),
     regex_filters: Array.isArray(raw.regex_filters) ? raw.regex_filters : [],
     region_filters: Array.isArray(raw.region_filters) ? raw.region_filters : [],
+    ipinfo_filters: normalizeIPInfoFilters(raw.ipinfo_filters),
     routable_node_count: typeof raw.routable_node_count === "number" ? raw.routable_node_count : 0,
     status_code_rules: normalizeStatusCodeRules(raw.status_code_rules),
     reverse_proxy_empty_account_behavior:

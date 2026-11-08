@@ -94,6 +94,23 @@ export async function listNodes(filters: NodeListQuery): Promise<PageResponse<No
     query.set("enabled", String(filters.enabled));
   }
 
+  if (filters.min_fraud_score !== undefined) {
+    query.set("min_fraud_score", String(filters.min_fraud_score));
+  }
+  if (filters.max_fraud_score !== undefined) {
+    query.set("max_fraud_score", String(filters.max_fraud_score));
+  }
+  if (filters.ip_type && filters.ip_type !== "any") {
+    query.set("ip_type", filters.ip_type);
+  }
+  if (filters.native && filters.native !== "any") {
+    query.set("native", filters.native);
+  }
+  appendIfNotEmpty("asn", filters.asn);
+  if (filters.has_ipinfo !== undefined) {
+    query.set("has_ipinfo", String(filters.has_ipinfo));
+  }
+
   const data = await apiRequest<PageResponse<ApiNodeSummary>>(`${basePath}?${query.toString()}`);
   return {
     ...data,

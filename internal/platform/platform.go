@@ -35,6 +35,7 @@ type Platform struct {
 	// Filter configuration.
 	RegexFilters  node.TagFilter
 	RegionFilters []string // lowercase ISO codes, supports negation "!xx"
+	IPInfoFilters IPInfoFilter
 
 	// Other config fields.
 	StickyTTLNs                      int64
@@ -200,7 +201,14 @@ func (p *Platform) evaluateNode(
 		}
 	}
 
-	// 6. Has at least one latency record.
+	// 6. IP reputation filter (when configured).
+	if p.IPInfoFilters.Active() {
+		if !p.IPInfoFilters.Match(entry.GetEgressIPInfo()) {
+			return false
+		}
+	}
+
+	// 7. Has at least one latency record.
 	if !entry.HasLatency() {
 		return false
 	}

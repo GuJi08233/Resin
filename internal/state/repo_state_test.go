@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -521,6 +522,72 @@ func TestStateRepo_SystemConfig_RoundTrip(t *testing.T) {
 }
 
 // --- platforms ---
+
+func TestStateRepo_Platform_IPInfoFiltersRoundTrip(t *testing.T) {
+	repo := newTestStateRepo(t)
+	now := time.Now().UnixNano()
+
+	minScore, maxScore := 10, 60
+	p := model.Platform{
+		ID: "plat-ipinfo", Name: "IPInfoFilters", StickyTTLNs: 1000,
+		RegexFilters: []string{}, RegionFilters: []string{},
+		IPInfoFilters: model.PlatformIPInfoFilter{
+			MinFraudScore: &minScore,
+			MaxFraudScore: &maxScore,
+			IPType:        "residential",
+			Native:        "native",
+			ASNs:          []string{"AS64500", "!64501"},
+		},
+		ReverseProxyMissAction: "TREAT_AS_EMPTY", AllocationPolicy: "BALANCED",
+		UpdatedAtNs: now,
+	}
+	if err := repo.UpsertPlatform(p); err != nil {
+		t.Fatalf("UpsertPlatform: %v", err)
+	}
+
+	got, err := repo.GetPlatform(p.ID)
+	if err != nil {
+		t.Fatalf("GetPlatform: %v", err)
+	}
+	if got.IPInfoFilters.MinFraudScore == nil || *got.IPInfoFilters.MinFraudScore != 10 {
+		t.Fatalf("min_fraud_score = %v, want 10", got.IPInfoFilters.MinFraudScore)
+	}
+	if got.IPInfoFilters.MaxFraudScore == nil || *got.IPInfoFilters.MaxFraudScore != 60 {
+		t.Fatalf("max_fraud_score = %v, want 60", got.IPInfoFilters.MaxFraudScore)
+	}
+	if got.IPInfoFilters.IPType != "residential" || got.IPInfoFilters.Native != "native" {
+		t.Fatalf("type/native = %q/%q", got.IPInfoFilters.IPType, got.IPInfoFilters.Native)
+	}
+	if !reflect.DeepEqual(got.IPInfoFilters.ASNs, []string{"64500", "!64501"}) {
+		t.Fatalf("ASNs = %v, want [64500 !64501]", got.IPInfoFilters.ASNs)
+	}
+
+	list, err := repo.ListPlatforms()
+	if err != nil {
+		t.Fatalf("ListPlatforms: %v", err)
+	}
+	if len(list) != 1 || !reflect.DeepEqual(list[0].IPInfoFilters.ASNs, got.IPInfoFilters.ASNs) {
+		t.Fatalf("list ASNs = %+v", list)
+	}
+}
+
+func TestStateRepo_Platform_InvalidIPInfoFiltersRejected(t *testing.T) {
+	repo := newTestStateRepo(t)
+	bad := 101
+	err := repo.UpsertPlatform(model.Platform{
+		ID: "plat-bad-ipinfo", Name: "BadIPInfo", StickyTTLNs: 1000,
+		RegexFilters: []string{}, RegionFilters: []string{},
+		IPInfoFilters:          model.PlatformIPInfoFilter{MaxFraudScore: &bad},
+		ReverseProxyMissAction: "TREAT_AS_EMPTY", AllocationPolicy: "BALANCED",
+		UpdatedAtNs: time.Now().UnixNano(),
+	})
+	if err == nil {
+		t.Fatal("expected invalid ipinfo filter to be rejected")
+	}
+	if !strings.Contains(err.Error(), "ipinfo_filters") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
 
 func TestStateRepo_Platforms_CRUD(t *testing.T) {
 	repo := newTestStateRepo(t)
