@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Resinat/Resin/internal/config"
+	"github.com/Resinat/Resin/internal/ipinfo"
 	"github.com/Resinat/Resin/internal/node"
 	"github.com/Resinat/Resin/internal/probe"
 	"github.com/Resinat/Resin/internal/service"
@@ -280,5 +281,101 @@ func TestHandleListNodes_EnabledFilter(t *testing.T) {
 	body = decodeJSONMap(t, rec)
 	if body["total"] != float64(1) {
 		t.Fatalf("enabled=false total: got %v, want 1", body["total"])
+	}
+}
+
+func TestHandleProbeIPInfo_ReturnsProfile(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	sub := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
+	cp.SubMgr.Register(sub)
+
+	raw := []byte(`{"type":"ss","server":"1.1.1.1","port":443}`)
+	hash := node.HashFromRawOptions(raw)
+	cp.Pool.AddNodeFromSub(hash, raw, sub.ID)
+	sub.ManagedNodes().StoreNode(hash, subscription.ManagedNode{Tags: []string{"tag"}})
+
+	entry, ok := cp.Pool.GetEntry(hash)
+	if !ok {
+		t.Fatalf("node %s missing after add", hash.Hex())
+	}
+	ob := testutil.NewNoopOutbound()
+	entry.Outbound.Store(&ob)
+
+	cp.ProbeMgr = probe.NewProbeManager(probe.ProbeConfig{
+		Pool: cp.Pool,
+		Fetcher: func(_ node.Hash, _ string) ([]byte, time.Duration, error) {
+			return []byte(`{"ip":"203.0.113.88","asn":64500,"asOrganization":"Example ISP",` +
+				`"countryCode":"JP","fraudScore":56,"isResidential":false,"isBroadcast":true}`), 0, nil
+		},
+	})
+
+	rec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/nodes/"+hash.Hex()+"/actions/probe-ipinfo", nil, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("probe-ipinfo status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body := decodeJSONMap(t, rec)
+	if body["ip"] != "203.0.113.88" {
+		t.Fatalf("ip: got %v", body["ip"])
+	}
+	if body["asn"] != float64(64500) {
+		t.Fatalf("asn: got %v", body["asn"])
+	}
+	if body["fraud_score"] != float64(56) {
+		t.Fatalf("fraud_score: got %v", body["fraud_score"])
+	}
+	if body["risk_level"] != "medium_risk" {
+		t.Fatalf("risk_level: got %v", body["risk_level"])
+	}
+	if body["is_broadcast"] != true {
+		t.Fatalf("is_broadcast: got %v", body["is_broadcast"])
+	}
+}
+
+func TestListNodes_IncludesIPInfo(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	sub := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
+	cp.SubMgr.Register(sub)
+
+	raw := []byte(`{"type":"ss","server":"1.1.1.1","port":443}`)
+	hash := node.HashFromRawOptions(raw)
+	cp.Pool.AddNodeFromSub(hash, raw, sub.ID)
+	sub.ManagedNodes().StoreNode(hash, subscription.ManagedNode{Tags: []string{"tag"}})
+
+	entry, ok := cp.Pool.GetEntry(hash)
+	if !ok {
+		t.Fatalf("node %s missing after add", hash.Hex())
+	}
+	entry.SetEgressIPInfo(&ipinfo.Info{
+		IP:         "203.0.113.88",
+		ASN:        64500,
+		FraudScore: 10,
+		RiskLevel:  ipinfo.RiskLevelVeryClean,
+	})
+	entry.LastIPInfoProbeAttempt.Store(time.Now().UnixNano())
+
+	rec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/nodes?subscription_id="+sub.ID, nil, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list nodes status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body := decodeJSONMap(t, rec)
+	items, ok := body["items"].([]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("items mismatch: got %T len=%d", body["items"], len(items))
+	}
+	item, ok := items[0].(map[string]any)
+	if !ok {
+		t.Fatalf("item type: got %T", items[0])
+	}
+	info, ok := item["ipinfo"].(map[string]any)
+	if !ok {
+		t.Fatalf("ipinfo missing: got %T", item["ipinfo"])
+	}
+	if info["ip"] != "203.0.113.88" || info["risk_level"] != "very_clean" {
+		t.Fatalf("ipinfo: got %+v", info)
+	}
+	if item["last_ipinfo_probe_attempt"] == nil || item["last_ipinfo_probe_attempt"] == "" {
+		t.Fatalf("last_ipinfo_probe_attempt missing: %v", item["last_ipinfo_probe_attempt"])
 	}
 }

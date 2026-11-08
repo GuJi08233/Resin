@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Resinat/Resin/internal/ipinfo"
 	"github.com/Resinat/Resin/internal/model"
 	"github.com/Resinat/Resin/internal/node"
 	"github.com/Resinat/Resin/internal/platform"
@@ -738,24 +739,26 @@ type PlatformSpecFilter struct {
 
 // NodeSummary is the API response for a node.
 type NodeSummary struct {
-	NodeHash                         string    `json:"node_hash"`
-	ParentHash                       string    `json:"parent_hash,omitempty"`
-	WarpFamily                       string    `json:"warp_family,omitempty"`
-	CreatedAt                        string    `json:"created_at"`
-	Enabled                          bool      `json:"enabled"`
-	DisplayTag                       string    `json:"display_tag,omitempty"`
-	HasOutbound                      bool      `json:"has_outbound"`
-	LastError                        string    `json:"last_error,omitempty"`
-	CircuitOpenSince                 *string   `json:"circuit_open_since"`
-	FailureCount                     int       `json:"failure_count"`
-	EgressIP                         string    `json:"egress_ip,omitempty"`
-	Region                           string    `json:"region,omitempty"`
-	LastEgressUpdate                 string    `json:"last_egress_update,omitempty"`
-	LastLatencyProbeAttempt          string    `json:"last_latency_probe_attempt,omitempty"`
-	LastAuthorityLatencyProbeAttempt string    `json:"last_authority_latency_probe_attempt,omitempty"`
-	ReferenceLatencyMs               *float64  `json:"reference_latency_ms,omitempty"`
-	LastEgressUpdateAttempt          string    `json:"last_egress_update_attempt,omitempty"`
-	Tags                             []NodeTag `json:"tags"`
+	NodeHash                         string       `json:"node_hash"`
+	ParentHash                       string       `json:"parent_hash,omitempty"`
+	WarpFamily                       string       `json:"warp_family,omitempty"`
+	CreatedAt                        string       `json:"created_at"`
+	Enabled                          bool         `json:"enabled"`
+	DisplayTag                       string       `json:"display_tag,omitempty"`
+	HasOutbound                      bool         `json:"has_outbound"`
+	LastError                        string       `json:"last_error,omitempty"`
+	CircuitOpenSince                 *string      `json:"circuit_open_since"`
+	FailureCount                     int          `json:"failure_count"`
+	EgressIP                         string       `json:"egress_ip,omitempty"`
+	Region                           string       `json:"region,omitempty"`
+	IPInfo                           *ipinfo.Info `json:"ipinfo,omitempty"`
+	LastIPInfoProbeAttempt           string       `json:"last_ipinfo_probe_attempt,omitempty"`
+	LastEgressUpdate                 string       `json:"last_egress_update,omitempty"`
+	LastLatencyProbeAttempt          string       `json:"last_latency_probe_attempt,omitempty"`
+	LastAuthorityLatencyProbeAttempt string       `json:"last_authority_latency_probe_attempt,omitempty"`
+	ReferenceLatencyMs               *float64     `json:"reference_latency_ms,omitempty"`
+	LastEgressUpdateAttempt          string       `json:"last_egress_update_attempt,omitempty"`
+	Tags                             []NodeTag    `json:"tags"`
 }
 
 // IsHealthyAndEnabled follows the node-summary health rule used by API/UI
@@ -802,6 +805,11 @@ func (s *ControlPlaneService) nodeEntryToSummary(h node.Hash, entry *node.NodeEn
 		if s.GeoIP != nil {
 			ns.Region = entry.GetRegion(s.GeoIP.Lookup)
 		}
+	}
+
+	ns.IPInfo = entry.GetEgressIPInfo()
+	if lastIPInfo := entry.LastIPInfoProbeAttempt.Load(); lastIPInfo > 0 {
+		ns.LastIPInfoProbeAttempt = time.Unix(0, lastIPInfo).UTC().Format(time.RFC3339Nano)
 	}
 
 	if leu := entry.LastEgressUpdate.Load(); leu > 0 {

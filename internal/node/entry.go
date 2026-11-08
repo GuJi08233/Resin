@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Resinat/Resin/internal/ipinfo"
 	"github.com/sagernet/sing-box/adapter"
 )
 
@@ -49,15 +50,17 @@ type NodeEntry struct {
 
 	// Atomic dynamic fields for concurrent hot-path reads.
 	FailureCount     atomic.Int32
-	CircuitOpenSince atomic.Int64               // unix-nano; 0 = not open
-	egressIP         atomic.Pointer[netip.Addr] // nil before first store
-	egressRegion     atomic.Pointer[string]     // lowercase country code from probe trace; nil when unknown
-	LastEgressUpdate atomic.Int64               // unix-nano of last successful egress-IP sample
+	CircuitOpenSince atomic.Int64                // unix-nano; 0 = not open
+	egressIP         atomic.Pointer[netip.Addr]  // nil before first store
+	egressRegion     atomic.Pointer[string]      // lowercase country code from probe trace; nil when unknown
+	egressIPInfo     atomic.Pointer[ipinfo.Info] // last IPPure reputation sample; nil when unknown
+	LastEgressUpdate atomic.Int64                // unix-nano of last successful egress-IP sample
 	// Probe-attempt timestamps (unix-nano). These are updated regardless of
 	// probe success/failure, and are used by probe schedulers.
 	LastLatencyProbeAttempt          atomic.Int64
 	LastAuthorityLatencyProbeAttempt atomic.Int64
 	LastEgressUpdateAttempt          atomic.Int64
+	LastIPInfoProbeAttempt           atomic.Int64
 	LatencyTable                     *LatencyTable // per-domain latency stats; nil if not initialized
 
 	// Outbound instance for this node.
@@ -306,6 +309,28 @@ func (e *NodeEntry) GetRegion(geoLookup func(netip.Addr) string) string {
 		return ""
 	}
 	return geoLookup(egressIP)
+}
+
+// GetEgressIPInfo returns a copy of the node's last IPPure reputation sample,
+// or nil when no successful sample exists yet.
+func (e *NodeEntry) GetEgressIPInfo() *ipinfo.Info {
+	ptr := e.egressIPInfo.Load()
+	if ptr == nil {
+		return nil
+	}
+	cp := *ptr
+	return &cp
+}
+
+// SetEgressIPInfo stores the node's latest IPPure reputation sample.
+// Nil clears the stored value.
+func (e *NodeEntry) SetEgressIPInfo(info *ipinfo.Info) {
+	if info == nil {
+		e.egressIPInfo.Store(nil)
+		return
+	}
+	cp := *info
+	e.egressIPInfo.Store(&cp)
 }
 
 // SetLastError sets the node's error string (thread-safe).

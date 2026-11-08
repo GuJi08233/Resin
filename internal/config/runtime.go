@@ -23,6 +23,13 @@ type RuntimeConfig struct {
 	LatencyTestURL     string   `json:"latency_test_url"`
 	LatencyAuthorities []string `json:"latency_authorities"`
 
+	// IP reputation probe (IPPure). Disabled by default because it is a
+	// third-party service; enabling it adds one extra outbound request per
+	// node per interval.
+	IPInfoProbeEnabled    bool     `json:"ipinfo_probe_enabled"`
+	IPInfoProbeURL        string   `json:"ipinfo_probe_url"`
+	MaxIPInfoTestInterval Duration `json:"max_ipinfo_test_interval"`
+
 	// WARP derived exits. Original subscription nodes remain available.
 	WarpEnabled           bool   `json:"warp_enabled"`
 	WarpStack             string `json:"warp_stack"`
@@ -57,6 +64,10 @@ func NewDefaultRuntimeConfig() *RuntimeConfig {
 
 		LatencyTestURL:     "https://www.gstatic.com/generate_204",
 		LatencyAuthorities: []string{"gstatic.com", "google.com", "cloudflare.com", "github.com"},
+
+		IPInfoProbeEnabled:    false,
+		IPInfoProbeURL:        "https://my.ippure.com/v1/info",
+		MaxIPInfoTestInterval: Duration(12 * time.Hour),
 
 		WarpEnabled:           false,
 		WarpStack:             "dual",

@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Resinat/Resin/internal/ipinfo"
 	"github.com/Resinat/Resin/internal/netutil"
 	"github.com/Resinat/Resin/internal/node"
 	"github.com/Resinat/Resin/internal/scanloop"
@@ -36,9 +37,15 @@ type ProbeConfig struct {
 	MaxEgressTestInterval           func() time.Duration
 	MaxLatencyTestInterval          func() time.Duration
 	MaxAuthorityLatencyTestInterval func() time.Duration
+	MaxIPInfoTestInterval           func() time.Duration
 
 	LatencyTestURL     func() string
 	LatencyAuthorities func() []string
+
+	// IP reputation probe settings (IPPure). Nil or disabled closures turn the
+	// periodic scanner into a no-op; manual sync probes still work.
+	IPInfoProbeEnabled func() bool
+	IPInfoProbeURL     func() string
 
 	// OnProbeEvent is called after each probe attempt completes (egress or latency).
 	// The kind parameter is "egress" or "latency".
@@ -65,8 +72,11 @@ type ProbeManager struct {
 	maxEgressTestInterval           func() time.Duration
 	maxLatencyTestInterval          func() time.Duration
 	maxAuthorityLatencyTestInterval func() time.Duration
+	maxIPInfoTestInterval           func() time.Duration
 	latencyTestURL                  func() string
 	latencyAuthorities              func() []string
+	ipInfoProbeEnabled              func() bool
+	ipInfoProbeURL                  func() string
 	onProbeEvent                    func(kind string)
 }
 
@@ -74,6 +84,7 @@ const (
 	egressTraceURL        = "https://cloudflare.com/cdn-cgi/trace"
 	egressTraceDomain     = "cloudflare.com"
 	defaultLatencyTestURL = "https://www.gstatic.com/generate_204"
+	defaultIPInfoProbeURL = "https://my.ippure.com/v1/info"
 	defaultQueueCap       = 1024
 )
 
@@ -89,6 +100,7 @@ type probeTaskKind uint8
 const (
 	probeTaskKindEgress probeTaskKind = iota
 	probeTaskKindLatency
+	probeTaskKindIPInfo
 )
 
 type probeTaskKey struct {
@@ -267,8 +279,11 @@ func NewProbeManager(cfg ProbeConfig) *ProbeManager {
 		maxEgressTestInterval:           cfg.MaxEgressTestInterval,
 		maxLatencyTestInterval:          cfg.MaxLatencyTestInterval,
 		maxAuthorityLatencyTestInterval: cfg.MaxAuthorityLatencyTestInterval,
+		maxIPInfoTestInterval:           cfg.MaxIPInfoTestInterval,
 		latencyTestURL:                  cfg.LatencyTestURL,
 		latencyAuthorities:              cfg.LatencyAuthorities,
+		ipInfoProbeEnabled:              cfg.IPInfoProbeEnabled,
+		ipInfoProbeURL:                  cfg.IPInfoProbeURL,
 		onProbeEvent:                    cfg.OnProbeEvent,
 	}
 }
@@ -290,6 +305,12 @@ func (m *ProbeManager) Start() {
 	go func() {
 		defer m.wg.Done()
 		scanloop.Run(m.stopCh, scanloop.DefaultMinInterval, scanloop.DefaultJitterRange, m.scanLatency)
+	}()
+
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		scanloop.Run(m.stopCh, scanloop.DefaultMinInterval, scanloop.DefaultJitterRange, m.scanIPInfo)
 	}()
 
 	for i := 0; i < m.workerCount; i++ {
@@ -326,6 +347,12 @@ func (m *ProbeManager) TriggerImmediateEgressProbe(hash node.Hash) {
 // Caller returns immediately.
 func (m *ProbeManager) TriggerImmediateLatencyProbe(hash node.Hash) {
 	m.enqueueProbe(hash, probeTaskKindLatency, probePriorityNormal)
+}
+
+// TriggerImmediateIPInfoProbe enqueues an async IP reputation probe for a node.
+// Caller returns immediately.
+func (m *ProbeManager) TriggerImmediateIPInfoProbe(hash node.Hash) {
+	m.enqueueProbe(hash, probeTaskKindIPInfo, probePriorityNormal)
 }
 
 // EgressProbeResult holds the results of a synchronous egress probe.
@@ -431,6 +458,37 @@ func (m *ProbeManager) ProbeLatencySync(hash node.Hash) (*LatencyProbeResult, er
 	}, nil
 }
 
+// ProbeIPInfoSync performs a blocking IP reputation probe through the node and
+// returns the parsed profile. Used by API action endpoints.
+func (m *ProbeManager) ProbeIPInfoSync(hash node.Hash) (*ipinfo.Info, error) {
+	if m.fetcher == nil {
+		return nil, fmt.Errorf("no probe fetcher configured")
+	}
+	select {
+	case <-m.stopCh:
+		return nil, fmt.Errorf("probe manager stopped")
+	default:
+	}
+
+	entry, ok := m.pool.GetEntry(hash)
+	if !ok {
+		return nil, fmt.Errorf("node not found")
+	}
+	if entry.Outbound.Load() == nil {
+		return nil, fmt.Errorf("node outbound not ready")
+	}
+
+	if m.onProbeEvent != nil {
+		m.onProbeEvent("ipinfo")
+	}
+
+	info, err := m.performIPInfoProbe(hash)
+	if err != nil {
+		return nil, err
+	}
+	return info, nil
+}
+
 // scanEgress iterates all pool nodes and probes those due for egress check.
 func (m *ProbeManager) scanEgress() {
 	now := time.Now()
@@ -515,6 +573,48 @@ func (m *ProbeManager) scanLatency() {
 	})
 }
 
+// scanIPInfo iterates all pool nodes and probes those due for an IP
+// reputation refresh. It is a no-op unless the runtime config enables it.
+func (m *ProbeManager) scanIPInfo() {
+	if m.ipInfoProbeEnabled == nil || !m.ipInfoProbeEnabled() {
+		return
+	}
+
+	now := time.Now()
+	interval := 12 * time.Hour
+	if m.maxIPInfoTestInterval != nil {
+		interval = m.maxIPInfoTestInterval()
+	}
+	lookahead := 15 * time.Second
+	subLookup := m.pool.MakeSubLookup()
+
+	m.pool.Range(func(h node.Hash, entry *node.NodeEntry) bool {
+		select {
+		case <-m.stopCh:
+			return false
+		default:
+		}
+
+		if entry.IsDisabledBySubscriptions(subLookup) {
+			return true
+		}
+		if entry.Outbound.Load() == nil {
+			return true
+		}
+
+		lastAttempt := entry.LastIPInfoProbeAttempt.Load()
+		if lastAttempt > 0 {
+			nextDue := time.Unix(0, lastAttempt).Add(interval).Add(-lookahead)
+			if now.Before(nextDue) {
+				return true
+			}
+		}
+
+		m.enqueueProbe(h, probeTaskKindIPInfo, probePriorityNormal)
+		return true
+	})
+}
+
 func (m *ProbeManager) runProbeWorker() {
 	for {
 		task, ok := m.taskQueue.Dequeue()
@@ -546,6 +646,8 @@ func (m *ProbeManager) executeTask(task probeTask) {
 		m.probeEgress(task.key.hash, entry)
 	case probeTaskKindLatency:
 		m.probeLatency(task.key.hash, entry, m.currentLatencyTestURL())
+	case probeTaskKindIPInfo:
+		m.probeIPInfo(task.key.hash, entry)
 	}
 }
 
@@ -779,6 +881,54 @@ func (m *ProbeManager) probeLatency(hash node.Hash, entry *node.NodeEntry, testU
 		log.Printf("[probe] latency probe failed for %s: %v", hash.Hex(), err)
 		return
 	}
+}
+
+// probeIPInfo performs a single IP reputation probe against a node.
+// The attempt timestamp is recorded by the pool on both success and failure.
+func (m *ProbeManager) probeIPInfo(hash node.Hash, entry *node.NodeEntry) {
+	if m.fetcher == nil || entry.Outbound.Load() == nil {
+		return
+	}
+
+	if m.onProbeEvent != nil {
+		m.onProbeEvent("ipinfo")
+	}
+
+	if _, err := m.performIPInfoProbe(hash); err != nil {
+		log.Printf("[probe] ipinfo probe failed for %s: %v", hash.Hex(), err)
+	}
+}
+
+func (m *ProbeManager) performIPInfoProbe(hash node.Hash) (*ipinfo.Info, error) {
+	info, _, err := m.performIPInfoProbeRaw(hash)
+	return info, err
+}
+
+func (m *ProbeManager) performIPInfoProbeRaw(hash node.Hash) (*ipinfo.Info, time.Duration, error) {
+	body, latency, err := m.fetcher(hash, m.currentIPInfoProbeURL())
+	if err != nil {
+		m.pool.UpdateNodeIPInfo(hash, nil)
+		return nil, 0, fmt.Errorf("ipinfo probe failed: %w", err)
+	}
+
+	info, err := ipinfo.Parse(body)
+	if err != nil {
+		m.pool.UpdateNodeIPInfo(hash, nil)
+		return nil, latency, err
+	}
+	info.UpdatedAt = time.Now().UTC()
+
+	m.pool.UpdateNodeIPInfo(hash, info)
+	return info, latency, nil
+}
+
+func (m *ProbeManager) currentIPInfoProbeURL() string {
+	if m.ipInfoProbeURL != nil {
+		if url := m.ipInfoProbeURL(); url != "" {
+			return url
+		}
+	}
+	return defaultIPInfoProbeURL
 }
 
 func (m *ProbeManager) performEgressProbe(hash node.Hash) (netip.Addr, egressProbeErrorStage, error) {

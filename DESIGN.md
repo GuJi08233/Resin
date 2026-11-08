@@ -431,6 +431,16 @@ Resin 使用计数器熔断机制保护系统稳定性。
     * 成功：先调用 `RecordResult(true)`；调用 `RecordLatency(..., &latency)`（`latency<=0` 时仅记录尝试，不写样本）。
     * 失败：调用 `RecordResult(false)` 与 `RecordLatency(..., nil)`。连续失败将导致节点熔断。
 
+#### IP 画像探测（IPPure）
+* 目标：全局节点池所有节点。默认关闭，需在运行时配置中开启 `IPInfoProbeEnabled`。
+* 职责：采集节点出口 IP 的位置、ASN、风险系数与纯净度，用于人工挑选出口或后续策略扩展。
+* 探测时机与调度策略：每隔 13～17 秒全局扫描一次，调度依据 `LastIPInfoProbeAttempt`，对未来 15 秒内将会或者已经超过 `MaxIPInfoTestInterval`（默认 12 小时）的节点进行探测。
+* 探测动作：**通过节点自身的 outbound** 请求 `IPInfoProbeURL`（默认 `https://my.ippure.com/v1/info`）。该公开接口只返回调用方 IP 的信息，因此必须经由节点发起，不能由宿主机直连。
+* 结果处理：
+    * 成功：调用 `UpdateNodeIPInfo(id, info)`，写入节点画像并记录尝试时间。
+    * 失败或解析失败：调用 `UpdateNodeIPInfo(id, nil)` 仅记录尝试时间，**不**调用 `RecordResult`，即 IP 画像探测失败不影响熔断状态。
+* 同步接口：`POST /nodes/{node_hash}/actions/probe-ipinfo`，不走异步队列限流。
+
 #### 主动探测的并发控制
 ProbeManager 采用 **双优先级队列 + 固定 worker 池** 的调度模型：
 * **执行**：定期扫描器只负责把待探测节点入队；固定数量 worker 异步消费并执行探测。
@@ -605,7 +615,7 @@ Resin 项目中所有的数据库都设计为单写，不会有多进程写入�
 
 #### cache.db
 * nodes_static(hash PK, raw_options_json, created_at_ns)
-* nodes_dynamic(hash PK, failure_count, circuit_open_since, egress_ip, egress_updated_at_ns, last_latency_probe_attempt_ns, last_authority_latency_probe_attempt_ns, last_egress_update_attempt_ns)
+* nodes_dynamic(hash PK, failure_count, circuit_open_since, egress_ip, egress_updated_at_ns, last_latency_probe_attempt_ns, last_authority_latency_probe_attempt_ns, last_egress_update_attempt_ns, ipinfo_json, last_ipinfo_probe_attempt_ns)
 * node_latency(node_hash, domain, ewma_ns, last_updated_ns, PK(node_hash,domain))。
 * leases(platform_id, account, node_hash, egress_ip, expiry_ns, last_accessed_ns, PK(platform_id,account))。
 * subscription_nodes(subscription_id, node_hash, tags_json, PK(subscription_id,node_hash))
@@ -1077,6 +1087,9 @@ Resin 需要做实事与历史的统计数据，用于 Dashboard 展示。
   "max_egress_test_interval": "24h",
   "latency_test_url": "https://www.gstatic.com/generate_204",
   "latency_authorities": ["gstatic.com", "google.com", "cloudflare.com", "github.com"],
+  "ipinfo_probe_enabled": false,
+  "ipinfo_probe_url": "https://my.ippure.com/v1/info",
+  "max_ipinfo_test_interval": "12h",
   "warp_enabled": false,
   "warp_stack": "dual",
   "warp_exits_per_family": 1,
@@ -1109,6 +1122,9 @@ Resin 需要做实事与历史的统计数据，用于 Dashboard 展示。
   "max_egress_test_interval": "24h",
   "latency_test_url": "https://www.gstatic.com/generate_204",
   "latency_authorities": ["gstatic.com", "google.com", "cloudflare.com", "github.com"],
+  "ipinfo_probe_enabled": false,
+  "ipinfo_probe_url": "https://my.ippure.com/v1/info",
+  "max_ipinfo_test_interval": "12h",
   "warp_enabled": false,
   "warp_stack": "dual",
   "warp_exits_per_family": 1,
@@ -1655,6 +1671,26 @@ Body：
   "last_latency_probe_attempt": "2026-02-10T12:21:00Z",
   "last_authority_latency_probe_attempt": "2026-02-10T12:21:00Z",
   "last_egress_update_attempt": "2026-02-10T12:20:00Z",
+  "ipinfo": {
+    "ip": "1.2.3.4",
+    "asn": 64500,
+    "as_organization": "Example ISP",
+    "country": "Japan",
+    "country_code": "jp",
+    "region": "Tokyo",
+    "region_code": "13",
+    "city": "Tokyo",
+    "timezone": "Asia/Tokyo",
+    "latitude": "35.68950",
+    "longitude": "139.69171",
+    "postal_code": "100-0001",
+    "fraud_score": 56,
+    "risk_level": "medium_risk",
+    "is_residential": false,
+    "is_broadcast": true,
+    "updated_at": "2026-02-10T12:20:30Z"
+  },
+  "last_ipinfo_probe_attempt": "2026-02-10T12:20:30Z",
   "reference_latency_ms": 123.4,
   "tags": [
     {
@@ -1666,6 +1702,8 @@ Body：
   "last_error": "..."
 }
 ```
+
+`ipinfo` 仅在至少成功探测过一次后出现（`omitempty`）。`is_broadcast=true` 表示广播 IP（非原生），`is_residential=true` 表示住宅 IP；两者都为 false 时通常为机房 IP。`risk_level` 由 `fraud_score` 按 `[0,15,25,40,50,70,100]` 分档得到：`very_clean`、`clean`、`neutral`、`light_risk`、`medium_risk`、`high_risk`。
 
 #### NodeTag 模型
 ```json
@@ -1781,6 +1819,23 @@ Response：
 * `404 NOT_FOUND`：节点不存在。
 
 返回 LatencyTestURL 的站点在 TD-EWMA 后的延迟 `latency_ewma_ms`。
+
+#### 触发节点 IP 画像探测（Action）
+
+**POST** `/nodes/{node_hash}/actions/probe-ipinfo`
+
+请求体：无。
+
+校验规则：
+
+* `node_hash` 必须为 32 位十六进制字符串（大小写均可）。
+
+错误码映射（最小集）：
+
+* `400 INVALID_ARGUMENT`：`node_hash` 格式非法。
+* `404 NOT_FOUND`：节点不存在。
+
+返回 IPPure 画像对象（即 Node 摘要中的 `ipinfo` 结构）。探测经由节点 outbound 发起，成功结果同时写回节点并持久化到 `nodes_dynamic.ipinfo_json`。
 
 ### Leases
 
@@ -2420,6 +2475,11 @@ Resin 支持通过 API (`PATCH /system/config`) 动态调整大部分全局运�
 #### 探测设置
 * `LatencyTestURL`: 主动延迟探测的目标 URL。默认 `https://www.gstatic.com/generate_204`。一定属于 LatencyAuthorities 之一。如果不属于就加入。
 * `LatencyAuthorities`: 权威域名列表。默认 `["gstatic.com", "google.com", "cloudflare.com", "github.com"]`。
+
+#### IP 画像设置（IPPure）
+* `IPInfoProbeEnabled` (`ipinfo_probe_enabled`): 是否启用周期性 IP 画像探测。默认 False。关闭时仍可通过节点 Action 手动触发单次探测。
+* `IPInfoProbeURL` (`ipinfo_probe_url`): 画像探测接口。默认 `https://my.ippure.com/v1/info`；留空时回退到默认值。
+* `MaxIPInfoTestInterval` (`max_ipinfo_test_interval`): 单节点画像探测最大间隔。最小 30 秒，默认 12 小时。
 
 #### P2C 选路设置
 * `P2CLatencyWindow`: 在 P2C 选路时，仅考虑该时间窗口内更新过的延迟数据。默认 10 分钟。

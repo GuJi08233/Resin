@@ -22,6 +22,60 @@ func newTestCacheRepo(t *testing.T) *CacheRepo {
 	return newCacheRepo(db)
 }
 
+// TestMigrateCacheDB_UpgradesV2NodesDynamicToIPInfo verifies that a cache.db
+// created at migration v2 gains the IP profile columns with sane defaults.
+func TestMigrateCacheDB_UpgradesV2NodesDynamicToIPInfo(t *testing.T) {
+	dir := t.TempDir()
+	db, err := OpenDB(dir + "/cache.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	// Build the v2 schema by hand.
+	if _, err := db.Exec(`
+		CREATE TABLE nodes_dynamic (
+			hash                                TEXT PRIMARY KEY,
+			failure_count                       INTEGER NOT NULL DEFAULT 0,
+			circuit_open_since                  INTEGER NOT NULL DEFAULT 0,
+			egress_ip                           TEXT NOT NULL DEFAULT '',
+			egress_region                       TEXT NOT NULL DEFAULT '',
+			egress_updated_at_ns                INTEGER NOT NULL DEFAULT 0,
+			last_latency_probe_attempt_ns       INTEGER NOT NULL DEFAULT 0,
+			last_authority_latency_probe_attempt_ns INTEGER NOT NULL DEFAULT 0,
+			last_egress_update_attempt_ns       INTEGER NOT NULL DEFAULT 0
+		);
+		INSERT INTO nodes_dynamic (hash, failure_count) VALUES ('legacy', 2);`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE schema_migrations (version uint64 NOT NULL PRIMARY KEY, dirty bool NOT NULL);
+		INSERT INTO schema_migrations (version, dirty) VALUES (2, 0);`); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := MigrateCacheDB(db); err != nil {
+		t.Fatalf("MigrateCacheDB: %v", err)
+	}
+
+	repo := newCacheRepo(db)
+	loaded, err := repo.LoadAllNodesDynamic()
+	if err != nil {
+		t.Fatalf("LoadAllNodesDynamic: %v", err)
+	}
+	if len(loaded) != 1 || loaded[0].Hash != "legacy" {
+		t.Fatalf("unexpected rows: %+v", loaded)
+	}
+	if loaded[0].FailureCount != 2 {
+		t.Fatalf("legacy row lost: %+v", loaded[0])
+	}
+	if loaded[0].IPInfoJSON != "" {
+		t.Fatalf("ipinfo_json default: got %q, want empty", loaded[0].IPInfoJSON)
+	}
+	if loaded[0].LastIPInfoProbeAttemptNs != 0 {
+		t.Fatalf("last_ipinfo_probe_attempt_ns default: got %d", loaded[0].LastIPInfoProbeAttemptNs)
+	}
+}
+
 // --- nodes_static ---
 
 func TestCacheRepo_NodesStatic_BulkUpsertAndLoad(t *testing.T) {
@@ -90,6 +144,8 @@ func TestCacheRepo_NodesDynamic_BulkUpsertAndLoad(t *testing.T) {
 			LastLatencyProbeAttemptNs:          700,
 			LastAuthorityLatencyProbeAttemptNs: 800,
 			LastEgressUpdateAttemptNs:          900,
+			IPInfoJSON:                         `{"ip":"1.2.3.4","asn":64500,"fraud_score":56}`,
+			LastIPInfoProbeAttemptNs:           950,
 		},
 	}
 	if err := repo.BulkUpsertNodesDynamic(nodes); err != nil {
@@ -110,6 +166,12 @@ func TestCacheRepo_NodesDynamic_BulkUpsertAndLoad(t *testing.T) {
 		loaded[0].LastAuthorityLatencyProbeAttemptNs != 800 ||
 		loaded[0].LastEgressUpdateAttemptNs != 900 {
 		t.Fatalf("unexpected probe attempt fields: %+v", loaded[0])
+	}
+	if loaded[0].IPInfoJSON != `{"ip":"1.2.3.4","asn":64500,"fraud_score":56}` {
+		t.Fatalf("ipinfo_json: got %q", loaded[0].IPInfoJSON)
+	}
+	if loaded[0].LastIPInfoProbeAttemptNs != 950 {
+		t.Fatalf("last_ipinfo_probe_attempt_ns: got %d", loaded[0].LastIPInfoProbeAttemptNs)
 	}
 
 	// Update.

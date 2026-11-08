@@ -17,6 +17,7 @@ import (
 
 	"github.com/Resinat/Resin/internal/config"
 	"github.com/Resinat/Resin/internal/geoip"
+	"github.com/Resinat/Resin/internal/ipinfo"
 	"github.com/Resinat/Resin/internal/metrics"
 	"github.com/Resinat/Resin/internal/model"
 	"github.com/Resinat/Resin/internal/netutil"
@@ -307,11 +308,20 @@ func newTopologyRuntime(
 		MaxAuthorityLatencyTestInterval: func() time.Duration {
 			return time.Duration(runtimeConfigSnapshot(runtimeCfg).MaxAuthorityLatencyTestInterval)
 		},
+		MaxIPInfoTestInterval: func() time.Duration {
+			return time.Duration(runtimeConfigSnapshot(runtimeCfg).MaxIPInfoTestInterval)
+		},
 		LatencyTestURL: func() string {
 			return runtimeConfigSnapshot(runtimeCfg).LatencyTestURL
 		},
 		LatencyAuthorities: func() []string {
 			return runtimeConfigSnapshot(runtimeCfg).LatencyAuthorities
+		},
+		IPInfoProbeEnabled: func() bool {
+			return runtimeConfigSnapshot(runtimeCfg).IPInfoProbeEnabled
+		},
+		IPInfoProbeURL: func() string {
+			return runtimeConfigSnapshot(runtimeCfg).IPInfoProbeURL
 		},
 	})
 
@@ -544,6 +554,12 @@ func newFlushReaders(
 			if egressIP.IsValid() {
 				egressStr = egressIP.String()
 			}
+			ipInfoJSON := ""
+			if ipInfo := entry.GetEgressIPInfo(); ipInfo != nil {
+				if encoded, err := json.Marshal(ipInfo); err == nil {
+					ipInfoJSON = string(encoded)
+				}
+			}
 			return &model.NodeDynamic{
 				Hash:                               hash,
 				FailureCount:                       int(entry.FailureCount.Load()),
@@ -554,6 +570,8 @@ func newFlushReaders(
 				LastLatencyProbeAttemptNs:          entry.LastLatencyProbeAttempt.Load(),
 				LastAuthorityLatencyProbeAttemptNs: entry.LastAuthorityLatencyProbeAttempt.Load(),
 				LastEgressUpdateAttemptNs:          entry.LastEgressUpdateAttempt.Load(),
+				IPInfoJSON:                         ipInfoJSON,
+				LastIPInfoProbeAttemptNs:           entry.LastIPInfoProbeAttempt.Load(),
 			}
 		},
 		ReadNodeLatency: func(key model.NodeLatencyKey) *model.NodeLatency {
@@ -891,6 +909,13 @@ func restoreBootstrapNodeDynamics(
 		}
 		entry.SetEgressRegion(nd.EgressRegion)
 		entry.LastEgressUpdate.Store(nd.EgressUpdatedAtNs)
+		entry.LastIPInfoProbeAttempt.Store(nd.LastIPInfoProbeAttemptNs)
+		if nd.IPInfoJSON != "" {
+			var info ipinfo.Info
+			if err := json.Unmarshal([]byte(nd.IPInfoJSON), &info); err == nil {
+				entry.SetEgressIPInfo(&info)
+			}
+		}
 	}
 	log.Printf("Loaded %d node dynamic states from cache.db", len(dynamics))
 	return nil

@@ -4,6 +4,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Resinat/Resin/internal/ipinfo"
 	"github.com/Resinat/Resin/internal/node"
 	"github.com/Resinat/Resin/internal/probe"
 	"github.com/Resinat/Resin/internal/subscription"
@@ -246,6 +247,22 @@ func (s *ControlPlaneService) ProbeEgress(hashStr string) (*probe.EgressProbeRes
 		result.Region = entry.GetRegion(s.GeoIP.Lookup)
 	}
 	return result, nil
+}
+
+// ProbeIPInfo triggers a synchronous IP reputation probe and returns results.
+func (s *ControlPlaneService) ProbeIPInfo(hashStr string) (*ipinfo.Info, error) {
+	h, err := node.ParseHex(hashStr)
+	if err != nil {
+		return nil, invalidArg("node_hash: invalid format")
+	}
+	if _, ok := s.Pool.GetEntry(h); !ok {
+		return nil, notFound("node not found")
+	}
+	info, err := s.ProbeMgr.ProbeIPInfoSync(h)
+	if err != nil {
+		return nil, internal("ipinfo probe failed", err)
+	}
+	return info, nil
 }
 
 // ProbeLatency triggers a synchronous latency probe and returns results.

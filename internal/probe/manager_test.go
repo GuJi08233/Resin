@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Resinat/Resin/internal/ipinfo"
 	"github.com/Resinat/Resin/internal/node"
 	"github.com/Resinat/Resin/internal/subscription"
 	"github.com/Resinat/Resin/internal/testutil"
@@ -972,5 +973,188 @@ func TestParseCloudflareTrace_NoIP(t *testing.T) {
 	_, _, err := ParseCloudflareTrace(body)
 	if err == nil {
 		t.Fatal("expected error when ip field is missing")
+	}
+}
+
+// --- IP reputation (IPPure) probes ---
+
+func TestProbeIPInfo_Success(t *testing.T) {
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+	})
+
+	hash := node.HashFromRawOptions([]byte(`{"type":"ipinfo-ok"}`))
+	pool.AddNodeFromSub(hash, []byte(`{"type":"ipinfo-ok"}`), "sub1")
+
+	entry, ok := pool.GetEntry(hash)
+	if !ok {
+		t.Fatal("entry not found")
+	}
+	storeOutbound(entry)
+
+	var gotURL string
+	mgr := NewProbeManager(ProbeConfig{
+		Pool: pool,
+		Fetcher: func(_ node.Hash, url string) ([]byte, time.Duration, error) {
+			gotURL = url
+			return []byte(`{"ip":"203.0.113.7","asn":13335,"asOrganization":"Cloudflare, Inc.",` +
+				`"country":"United States","countryCode":"US","fraudScore":12,` +
+				`"isResidential":true,"isBroadcast":false}`), 0, nil
+		},
+	})
+
+	mgr.probeIPInfo(hash, entry)
+
+	if gotURL != defaultIPInfoProbeURL {
+		t.Fatalf("probe url: got %q, want %q", gotURL, defaultIPInfoProbeURL)
+	}
+	info := entry.GetEgressIPInfo()
+	if info == nil {
+		t.Fatal("expected stored ipinfo")
+	}
+	if info.IP != "203.0.113.7" || info.ASN != 13335 {
+		t.Fatalf("unexpected info: %+v", info)
+	}
+	if info.FraudScore != 12 || info.RiskLevel != ipinfo.RiskLevelVeryClean {
+		t.Fatalf("risk: score=%d level=%q", info.FraudScore, info.RiskLevel)
+	}
+	if !info.IsResidential || info.IsBroadcast {
+		t.Fatalf("flags: residential=%v broadcast=%v", info.IsResidential, info.IsBroadcast)
+	}
+	if info.UpdatedAt.IsZero() {
+		t.Fatal("expected UpdatedAt to be set")
+	}
+	if entry.LastIPInfoProbeAttempt.Load() == 0 {
+		t.Fatal("expected probe attempt timestamp")
+	}
+}
+
+func TestProbeIPInfo_FailureRecordsAttemptOnly(t *testing.T) {
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+	})
+
+	hash := node.HashFromRawOptions([]byte(`{"type":"ipinfo-fail"}`))
+	pool.AddNodeFromSub(hash, []byte(`{"type":"ipinfo-fail"}`), "sub1")
+
+	entry, ok := pool.GetEntry(hash)
+	if !ok {
+		t.Fatal("entry not found")
+	}
+	storeOutbound(entry)
+	// New nodes start circuit-open; clear it so the assertion below is meaningful.
+	entry.CircuitOpenSince.Store(0)
+
+	mgr := NewProbeManager(ProbeConfig{
+		Pool: pool,
+		Fetcher: func(_ node.Hash, _ string) ([]byte, time.Duration, error) {
+			return nil, 0, errors.New("connection refused")
+		},
+	})
+
+	mgr.probeIPInfo(hash, entry)
+
+	if entry.GetEgressIPInfo() != nil {
+		t.Fatal("should not store ipinfo on failure")
+	}
+	if entry.LastIPInfoProbeAttempt.Load() == 0 {
+		t.Fatal("expected attempt timestamp even on failure")
+	}
+	// An IP reputation failure must not touch the circuit breaker.
+	if entry.FailureCount.Load() != 0 {
+		t.Fatalf("failure count changed: %d", entry.FailureCount.Load())
+	}
+	if entry.CircuitOpenSince.Load() != 0 {
+		t.Fatal("ipinfo failure must not open the circuit")
+	}
+}
+
+func TestProbeIPInfo_ParseErrorKeepsCircuitHealthy(t *testing.T) {
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+	})
+
+	hash := node.HashFromRawOptions([]byte(`{"type":"ipinfo-badjson"}`))
+	pool.AddNodeFromSub(hash, []byte(`{"type":"ipinfo-badjson"}`), "sub1")
+
+	entry, ok := pool.GetEntry(hash)
+	if !ok {
+		t.Fatal("entry not found")
+	}
+	storeOutbound(entry)
+
+	mgr := NewProbeManager(ProbeConfig{
+		Pool: pool,
+		Fetcher: func(_ node.Hash, _ string) ([]byte, time.Duration, error) {
+			return []byte(`not json`), 0, nil
+		},
+	})
+
+	mgr.probeIPInfo(hash, entry)
+
+	if entry.GetEgressIPInfo() != nil {
+		t.Fatal("should not store ipinfo on parse error")
+	}
+	if entry.FailureCount.Load() != 0 {
+		t.Fatalf("parse error must not count as a health failure, got %d", entry.FailureCount.Load())
+	}
+}
+
+func TestProbeIPInfoSync_UsesConfiguredURL(t *testing.T) {
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+	})
+
+	hash := node.HashFromRawOptions([]byte(`{"type":"ipinfo-sync"}`))
+	pool.AddNodeFromSub(hash, []byte(`{"type":"ipinfo-sync"}`), "sub1")
+
+	entry, ok := pool.GetEntry(hash)
+	if !ok {
+		t.Fatal("entry not found")
+	}
+	storeOutbound(entry)
+
+	var gotURL string
+	mgr := NewProbeManager(ProbeConfig{
+		Pool: pool,
+		Fetcher: func(_ node.Hash, url string) ([]byte, time.Duration, error) {
+			gotURL = url
+			return []byte(`{"ip":"198.51.100.9","fraudScore":80}`), 0, nil
+		},
+		IPInfoProbeURL: func() string { return "https://example.invalid/custom" },
+	})
+
+	info, err := mgr.ProbeIPInfoSync(hash)
+	if err != nil {
+		t.Fatalf("ProbeIPInfoSync: %v", err)
+	}
+	if gotURL != "https://example.invalid/custom" {
+		t.Fatalf("probe url: got %q", gotURL)
+	}
+	if info.IP != "198.51.100.9" || info.RiskLevel != ipinfo.RiskLevelHighRisk {
+		t.Fatalf("unexpected info: %+v", info)
+	}
+}
+
+func TestProbeIPInfoSync_NodeWithoutOutbound(t *testing.T) {
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+	})
+
+	hash := node.HashFromRawOptions([]byte(`{"type":"ipinfo-no-outbound"}`))
+	pool.AddNodeFromSub(hash, []byte(`{"type":"ipinfo-no-outbound"}`), "sub1")
+
+	mgr := NewProbeManager(ProbeConfig{
+		Pool:    pool,
+		Fetcher: func(_ node.Hash, _ string) ([]byte, time.Duration, error) { return nil, 0, nil },
+	})
+
+	if _, err := mgr.ProbeIPInfoSync(hash); err == nil {
+		t.Fatal("expected error for node without outbound")
 	}
 }

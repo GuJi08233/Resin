@@ -16,6 +16,9 @@ const DEFAULT_CONFIG: RuntimeConfig = {
   max_egress_test_interval: "",
   latency_test_url: "",
   latency_authorities: [],
+  ipinfo_probe_enabled: false,
+  ipinfo_probe_url: "",
+  max_ipinfo_test_interval: "",
   warp_enabled: false,
   warp_stack: "dual",
   warp_exits_per_family: 1,
@@ -77,6 +80,12 @@ function normalizeRuntimeConfig(raw: Partial<RuntimeConfig> | null | undefined):
     latency_authorities: Array.isArray(raw.latency_authorities)
       ? raw.latency_authorities.filter((item): item is string => typeof item === "string")
       : DEFAULT_CONFIG.latency_authorities,
+    ipinfo_probe_enabled: Boolean(raw.ipinfo_probe_enabled),
+    ipinfo_probe_url: asString(raw.ipinfo_probe_url, DEFAULT_CONFIG.ipinfo_probe_url),
+    max_ipinfo_test_interval: asString(
+      raw.max_ipinfo_test_interval,
+      DEFAULT_CONFIG.max_ipinfo_test_interval,
+    ),
     warp_enabled: Boolean(raw.warp_enabled),
     warp_stack: raw.warp_stack === "ipv4" || raw.warp_stack === "ipv6" ? raw.warp_stack : "dual",
     warp_exits_per_family: asNumber(raw.warp_exits_per_family, DEFAULT_CONFIG.warp_exits_per_family),

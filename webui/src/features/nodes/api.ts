@@ -2,6 +2,7 @@ import { apiRequest } from "../../lib/api-client";
 import type {
   EgressProbeResult,
   LatencyProbeResult,
+  NodeIPInfo,
   NodeListQuery,
   NodeSummary,
   PageResponse,
@@ -9,7 +10,7 @@ import type {
 
 const basePath = "/api/v1/nodes";
 
-type ApiNodeSummary = Omit<NodeSummary, "tags" | "parent_hash" | "warp_family"> & {
+type ApiNodeSummary = Omit<NodeSummary, "tags" | "parent_hash" | "warp_family" | "ipinfo"> & {
   parent_hash?: string | null;
   warp_family?: string | null;
   tags?: NodeSummary["tags"] | null;
@@ -18,6 +19,8 @@ type ApiNodeSummary = Omit<NodeSummary, "tags" | "parent_hash" | "warp_family"> 
   last_error?: string | null;
   circuit_open_since?: string | null;
   egress_ip?: string | null;
+  ipinfo?: NodeIPInfo | null;
+  last_ipinfo_probe_attempt?: string | null;
   reference_latency_ms?: number | null;
   region?: string | null;
   last_egress_update?: string | null;
@@ -43,6 +46,8 @@ function normalizeNode(raw: ApiNodeSummary): NodeSummary {
     last_latency_probe_attempt: raw.last_latency_probe_attempt || "",
     last_authority_latency_probe_attempt: raw.last_authority_latency_probe_attempt || "",
     last_egress_update_attempt: raw.last_egress_update_attempt || "",
+    ipinfo: raw.ipinfo || undefined,
+    last_ipinfo_probe_attempt: raw.last_ipinfo_probe_attempt || "",
   };
 
   // Backend uses `omitempty`; field missing means "no reference latency".
@@ -109,6 +114,12 @@ export async function probeEgress(hash: string): Promise<EgressProbeResult> {
 
 export async function probeLatency(hash: string): Promise<LatencyProbeResult> {
   return apiRequest<LatencyProbeResult>(`${basePath}/${hash}/actions/probe-latency`, {
+    method: "POST",
+  });
+}
+
+export async function probeIPInfo(hash: string): Promise<NodeIPInfo> {
+  return apiRequest<NodeIPInfo>(`${basePath}/${hash}/actions/probe-ipinfo`, {
     method: "POST",
   });
 }

@@ -1255,3 +1255,44 @@ func TestListAccountHeaderRules_FailsFastOnCorruptPersistedHeadersColumn(t *test
 		t.Fatalf("unexpected wrapped service error: %v", serviceErr.Err)
 	}
 }
+
+func TestValidateRuntimeConfig_IPInfoProbe(t *testing.T) {
+	cfg := newDefaultCfg()
+	if cfg.IPInfoProbeEnabled {
+		t.Fatal("ipinfo probe should default to disabled")
+	}
+	if cfg.IPInfoProbeURL != "https://my.ippure.com/v1/info" {
+		t.Fatalf("default ipinfo url: got %q", cfg.IPInfoProbeURL)
+	}
+	if time.Duration(cfg.MaxIPInfoTestInterval) != 12*time.Hour {
+		t.Fatalf("default ipinfo interval: got %v", time.Duration(cfg.MaxIPInfoTestInterval))
+	}
+
+	cfg = newDefaultCfg()
+	cfg.MaxIPInfoTestInterval = config.Duration(29 * time.Second)
+	if err := validateRuntimeConfig(cfg); err == nil {
+		t.Fatal("expected error for max_ipinfo_test_interval < 30s")
+	}
+
+	cfg = newDefaultCfg()
+	cfg.IPInfoProbeURL = "not a url"
+	if err := validateRuntimeConfig(cfg); err == nil {
+		t.Fatal("expected error for invalid ipinfo_probe_url")
+	}
+
+	cfg = newDefaultCfg()
+	cfg.IPInfoProbeURL = ""
+	if err := validateRuntimeConfig(cfg); err != nil {
+		t.Fatalf("empty url should fall back to default, got %v", err)
+	}
+	if cfg.IPInfoProbeURL != "https://my.ippure.com/v1/info" {
+		t.Fatalf("fallback url: got %q", cfg.IPInfoProbeURL)
+	}
+
+	cfg = newDefaultCfg()
+	cfg.IPInfoProbeEnabled = true
+	cfg.MaxIPInfoTestInterval = config.Duration(30 * time.Second)
+	if err := validateRuntimeConfig(cfg); err != nil {
+		t.Fatalf("expected valid ipinfo config, got %v", err)
+	}
+}

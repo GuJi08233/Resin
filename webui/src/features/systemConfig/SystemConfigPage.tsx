@@ -30,6 +30,9 @@ type RuntimeConfigForm = {
   max_egress_test_interval: string;
   latency_test_url: string;
   latency_authorities_raw: string;
+  ipinfo_probe_enabled: boolean;
+  ipinfo_probe_url: string;
+  max_ipinfo_test_interval: string;
   warp_stack: RuntimeConfig["warp_stack"];
   warp_exits_per_family: string;
   warp_reconnect_attempts: string;
@@ -52,6 +55,9 @@ const EDITABLE_FIELDS: Array<keyof EditableRuntimeConfig> = [
   "max_egress_test_interval",
   "latency_test_url",
   "latency_authorities",
+  "ipinfo_probe_enabled",
+  "ipinfo_probe_url",
+  "max_ipinfo_test_interval",
   "warp_stack",
   "warp_exits_per_family",
   "warp_reconnect_attempts",
@@ -74,6 +80,9 @@ const FIELD_LABELS: Record<keyof RuntimeConfig, string> = {
   max_egress_test_interval: "出口 IP 更新检查间隔",
   latency_test_url: "延迟测试目标 URL",
   latency_authorities: "延迟测试权威域名列表",
+  ipinfo_probe_enabled: "启用 IP 画像探测",
+  ipinfo_probe_url: "IP 画像探测接口",
+  max_ipinfo_test_interval: "IP 画像最大探测间隔",
   warp_enabled: "启用 WARP 派生出口",
   warp_stack: "WARP 出口地址族",
   warp_exits_per_family: "每节点每地址族起始出口数",
@@ -116,6 +125,9 @@ function configToForm(config: RuntimeConfig): RuntimeConfigForm {
     max_egress_test_interval: config.max_egress_test_interval,
     latency_test_url: config.latency_test_url,
     latency_authorities_raw: config.latency_authorities.join("\n"),
+    ipinfo_probe_enabled: config.ipinfo_probe_enabled,
+    ipinfo_probe_url: config.ipinfo_probe_url,
+    max_ipinfo_test_interval: config.max_ipinfo_test_interval,
     warp_stack: config.warp_stack,
     warp_exits_per_family: String(config.warp_exits_per_family),
     warp_reconnect_attempts: String(config.warp_reconnect_attempts),
@@ -203,6 +215,18 @@ function parseForm(form: RuntimeConfigForm): EditableRuntimeConfig {
     max_egress_test_interval: parseDurationField("出口 IP 更新检查间隔", form.max_egress_test_interval),
     latency_test_url: latencyURL,
     latency_authorities: parseAuthorities(form.latency_authorities_raw),
+    ipinfo_probe_enabled: form.ipinfo_probe_enabled,
+    ipinfo_probe_url: (() => {
+      const url = form.ipinfo_probe_url.trim();
+      if (!url) {
+        throw new Error("IP 画像探测接口不能为空");
+      }
+      if (!url.startsWith("http://") && !url.startsWith("https://")) {
+        throw new Error("IP 画像探测接口必须是 http/https 地址");
+      }
+      return url;
+    })(),
+    max_ipinfo_test_interval: parseDurationField("IP 画像最大探测间隔", form.max_ipinfo_test_interval),
     warp_stack: form.warp_stack,
     warp_exits_per_family: parseBoundedInt("每节点每地址族起始出口数", form.warp_exits_per_family, 1, 8),
     warp_reconnect_attempts: parseBoundedInt("WARP 去重尝试次数", form.warp_reconnect_attempts, 1, 10),
@@ -700,6 +724,53 @@ export function SystemConfigPage() {
                       placeholder={"gstatic.com\ngoogle.com\ncloudflare.com"}
                       value={form.latency_authorities_raw}
                       onChange={(event) => setFormField("latency_authorities_raw", event.target.value)}
+                    />
+                  </div>
+                </div>
+              </section>
+
+              <section className="syscfg-section">
+                <h4>{t("IP 画像探测（IPPure）")}</h4>
+                <p className="muted">
+                  {t("启用后通过每个节点访问 IPPure 公开接口，采集出口 IP 的位置、ASN、风险系数与纯净度。关闭时仍可在节点详情里手动触发单次探测。")}
+                </p>
+                <div className="syscfg-checkbox-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px", marginTop: "16px" }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: "var(--surface-sunken, rgba(0,0,0,0.02))", padding: "12px 16px", borderRadius: "8px", border: "1px solid var(--border)" }}>
+                    <div style={{ display: "flex", alignItems: "center" }}>
+                      <span className="field-label" style={{ margin: 0, fontWeight: 500 }}>{t("启用 IP 画像探测")}</span>
+                      {renderRestoreButton("ipinfo_probe_enabled")}
+                    </div>
+                    <Switch
+                      checked={form.ipinfo_probe_enabled}
+                      onChange={(event) => setFormField("ipinfo_probe_enabled", event.target.checked)}
+                    />
+                  </div>
+                </div>
+                <div className="form-grid" style={{ marginTop: "16px" }}>
+                  <div className="field-group field-span-2">
+                    <div style={{ display: "flex", alignItems: "center" }}>
+                      <label className="field-label" htmlFor="sys-ipinfo-url" style={{ margin: 0 }}>
+                        {t("IP 画像探测接口")}
+                      </label>
+                      {renderRestoreButton("ipinfo_probe_url")}
+                    </div>
+                    <Input
+                      id="sys-ipinfo-url"
+                      value={form.ipinfo_probe_url}
+                      onChange={(event) => setFormField("ipinfo_probe_url", event.target.value)}
+                    />
+                  </div>
+                  <div className="field-group">
+                    <div style={{ display: "flex", alignItems: "center" }}>
+                      <label className="field-label" htmlFor="sys-max-ipinfo-int" style={{ margin: 0 }}>
+                        {t("IP 画像最大探测间隔")}
+                      </label>
+                      {renderRestoreButton("max_ipinfo_test_interval")}
+                    </div>
+                    <Input
+                      id="sys-max-ipinfo-int"
+                      value={form.max_ipinfo_test_interval}
+                      onChange={(event) => setFormField("max_ipinfo_test_interval", event.target.value)}
                     />
                   </div>
                 </div>

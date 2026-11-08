@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Resinat/Resin/internal/ipinfo"
 	"github.com/Resinat/Resin/internal/netutil"
 	"github.com/Resinat/Resin/internal/node"
 	"github.com/Resinat/Resin/internal/platform"
@@ -960,6 +961,30 @@ func (p *GlobalNodePool) UpdateNodeEgressIP(hash node.Hash, ip *netip.Addr, loc 
 	if ipChanged || regionChanged {
 		p.notifyAllPlatformsDirty(hash)
 	}
+	if entry.ParentHash == nil && p.onNodeDynamicChanged != nil {
+		p.onNodeDynamicChanged(hash)
+	}
+}
+
+// UpdateNodeIPInfo records an IPPure reputation probe attempt and, when info
+// is non-nil, stores the parsed profile. A nil info means "attempt only".
+// Fires OnNodeDynamicChanged only when stored data actually changes.
+func (p *GlobalNodePool) UpdateNodeIPInfo(hash node.Hash, info *ipinfo.Info) {
+	entry, ok := p.nodes.Load(hash)
+	if !ok {
+		return
+	}
+
+	entry.LastIPInfoProbeAttempt.Store(time.Now().UnixNano())
+
+	if info == nil {
+		if entry.ParentHash == nil && p.onNodeDynamicChanged != nil {
+			p.onNodeDynamicChanged(hash)
+		}
+		return
+	}
+
+	entry.SetEgressIPInfo(info)
 	if entry.ParentHash == nil && p.onNodeDynamicChanged != nil {
 		p.onNodeDynamicChanged(hash)
 	}

@@ -199,6 +199,19 @@ func HandleProbeEgress(cp *service.ControlPlaneService) http.HandlerFunc {
 	}
 }
 
+// HandleProbeIPInfo returns a handler for POST /api/v1/nodes/{hash}/actions/probe-ipinfo.
+func HandleProbeIPInfo(cp *service.ControlPlaneService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		hash := PathParam(r, "hash")
+		result, err := cp.ProbeIPInfo(hash)
+		if err != nil {
+			writeServiceError(w, err)
+			return
+		}
+		WriteJSON(w, http.StatusOK, result)
+	}
+}
+
 // HandleProbeLatency returns a handler for POST /api/v1/nodes/{hash}/actions/probe-latency.
 func HandleProbeLatency(cp *service.ControlPlaneService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

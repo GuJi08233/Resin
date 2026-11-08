@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createColumnHelper } from "@tanstack/react-table";
-import { AlertTriangle, Eraser, Globe, RefreshCw, Sparkles, X, Zap } from "lucide-react";
+import { AlertTriangle, Eraser, Globe, RefreshCw, Shield, Sparkles, X, Zap } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useLocation } from "react-router-dom";
 import { Badge } from "../../components/ui/Badge";
@@ -18,14 +18,14 @@ import { formatDateTime, formatRelativeTime } from "../../lib/time";
 import { listPlatforms } from "../platforms/api";
 import type { Platform } from "../platforms/types";
 import { listSubscriptions } from "../subscriptions/api";
-import { getNode, listNodes, probeEgress, probeLatency } from "./api";
-import type { NodeSummary } from "./types";
+import { getNode, listNodes, probeEgress, probeIPInfo, probeLatency } from "./api";
+import type { NodeIPInfo, NodeSummary } from "./types";
 import { getAllRegions, getRegionName } from "./regions";
 import type { NodeListFilters, NodeSortBy, SortOrder } from "./types";
 
 type NodeStatusFilter = "all" | "healthy" | "circuit_open" | "error" | "disabled";
 type NodeDisplayStatus = "healthy" | "circuit_open" | "pending_test" | "error" | "disabled";
-type ProbeAction = "egress" | "latency";
+type ProbeAction = "egress" | "latency" | "ipinfo";
 
 type NodeFilterDraft = {
   platform_id: string;
@@ -236,6 +236,48 @@ function displayableReferenceLatencyMs(node: NodeSummary): number | null {
 }
 
 
+type RiskBadgeVariant = "success" | "warning" | "danger" | "neutral";
+
+function riskLevelBadgeVariant(level: NodeIPInfo["risk_level"] | undefined): RiskBadgeVariant {
+  switch (level) {
+    case "very_clean":
+    case "clean":
+      return "success";
+    case "neutral":
+      return "neutral";
+    case "light_risk":
+    case "medium_risk":
+      return "warning";
+    case "high_risk":
+      return "danger";
+    default:
+      return "neutral";
+  }
+}
+
+function riskScoreColor(score: number): string {
+  if (!Number.isFinite(score)) {
+    return "var(--text-secondary)";
+  }
+  if (score < 25) {
+    return "var(--success)";
+  }
+  if (score < 50) {
+    return "var(--warning)";
+  }
+  return "var(--danger)";
+}
+
+// IPPure reports isBroadcast=true for non-native (broadcast) addresses and
+// isResidential=true for ISP/residential pools. Everything else is a data
+// center address.
+function ipPurityLabels(info: NodeIPInfo, t: (key: string) => string): { native: string; usage: string } {
+  return {
+    native: info.is_broadcast ? t("广播 IP") : t("原生 IP"),
+    usage: info.is_residential ? t("住宅 IP") : t("机房 IP"),
+  };
+}
+
 function formatLatency(value: number): string {
   if (!Number.isFinite(value)) {
     return "-";
@@ -275,9 +317,11 @@ export function NodesPage() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [pendingEgressHashes, setPendingEgressHashes] = useState<Set<string>>(() => new Set());
   const [pendingLatencyHashes, setPendingLatencyHashes] = useState<Set<string>>(() => new Set());
+  const [pendingIPInfoHashes, setPendingIPInfoHashes] = useState<Set<string>>(() => new Set());
   const { toasts, showToast, dismissToast } = useToast();
   const pendingEgressHashesRef = useRef<Set<string>>(new Set());
   const pendingLatencyHashesRef = useRef<Set<string>>(new Set());
+  const pendingIPInfoHashesRef = useRef<Set<string>>(new Set());
 
   const queryClient = useQueryClient();
 
@@ -413,51 +457,72 @@ export function NodesPage() {
     },
   });
 
-  const markProbePending = (hash: string, action: ProbeAction): boolean => {
-    if (action === "egress") {
-      if (pendingEgressHashesRef.current.has(hash)) {
-        return false;
-      }
-      const next = new Set(pendingEgressHashesRef.current);
-      next.add(hash);
-      pendingEgressHashesRef.current = next;
-      setPendingEgressHashes(next);
-      return true;
-    }
+  const probeIPInfoMutation = useMutation({
+    mutationFn: async (hash: string) => probeIPInfo(hash),
+    onSuccess: async (result) => {
+      await refreshNodes();
+      showToast(
+        "success",
+        t("IP 画像探测完成：{{ip}} · AS{{asn}} · 风险 {{score}}", {
+          ip: result.ip || "-",
+          asn: String(result.asn || "-"),
+          score: String(result.fraud_score ?? "-"),
+        })
+      );
+    },
+    onError: async (error) => {
+      await refreshNodes();
+      showToast("error", formatApiErrorMessage(error, t));
+    },
+  });
 
-    if (pendingLatencyHashesRef.current.has(hash)) {
+  const markProbePending = (hash: string, action: ProbeAction): boolean => {
+    const ref = action === "egress"
+      ? pendingEgressHashesRef
+      : action === "latency"
+        ? pendingLatencyHashesRef
+        : pendingIPInfoHashesRef;
+    const set = action === "egress"
+      ? setPendingEgressHashes
+      : action === "latency"
+        ? setPendingLatencyHashes
+        : setPendingIPInfoHashes;
+    if (ref.current.has(hash)) {
       return false;
     }
-    const next = new Set(pendingLatencyHashesRef.current);
+
+    const next = new Set(ref.current);
     next.add(hash);
-    pendingLatencyHashesRef.current = next;
-    setPendingLatencyHashes(next);
+    ref.current = next;
+    set(next);
     return true;
   };
 
   const clearProbePending = (hash: string, action: ProbeAction) => {
-    if (action === "egress") {
-      if (!pendingEgressHashesRef.current.has(hash)) {
-        return;
-      }
-      const next = new Set(pendingEgressHashesRef.current);
-      next.delete(hash);
-      pendingEgressHashesRef.current = next;
-      setPendingEgressHashes(next);
+    const ref = action === "egress"
+      ? pendingEgressHashesRef
+      : action === "latency"
+        ? pendingLatencyHashesRef
+        : pendingIPInfoHashesRef;
+    const set = action === "egress"
+      ? setPendingEgressHashes
+      : action === "latency"
+        ? setPendingLatencyHashes
+        : setPendingIPInfoHashes;
+    if (!ref.current.has(hash)) {
       return;
     }
-
-    if (!pendingLatencyHashesRef.current.has(hash)) {
-      return;
-    }
-    const next = new Set(pendingLatencyHashesRef.current);
+    const next = new Set(ref.current);
     next.delete(hash);
-    pendingLatencyHashesRef.current = next;
-    setPendingLatencyHashes(next);
+    ref.current = next;
+    set(next);
   };
 
-  const isProbePending = (hash: string, action: ProbeAction): boolean =>
-    action === "egress" ? pendingEgressHashes.has(hash) : pendingLatencyHashes.has(hash);
+  const isProbePending = (hash: string, action: ProbeAction): boolean => {
+    if (action === "egress") return pendingEgressHashes.has(hash);
+    if (action === "latency") return pendingLatencyHashes.has(hash);
+    return pendingIPInfoHashes.has(hash);
+  };
 
   const runProbeEgress = async (hash: string) => {
     if (!markProbePending(hash, "egress")) {
@@ -469,6 +534,19 @@ export function NodesPage() {
       // Mutation callbacks already surface the failure to the user.
     } finally {
       clearProbePending(hash, "egress");
+    }
+  };
+
+  const runProbeIPInfo = async (hash: string) => {
+    if (!markProbePending(hash, "ipinfo")) {
+      return;
+    }
+    try {
+      await probeIPInfoMutation.mutateAsync(hash);
+    } catch {
+      // Mutation callbacks already surface the failure to the user.
+    } finally {
+      clearProbePending(hash, "ipinfo");
     }
   };
 
@@ -565,6 +643,36 @@ export function NodesPage() {
       },
     }),
     col.display({
+      id: "ipinfo",
+      header: t("IP 属性"),
+      cell: (info) => {
+        const node = info.row.original;
+        if (!node.ipinfo) {
+          return <span className="muted">-</span>;
+        }
+        const labels = ipPurityLabels(node.ipinfo, t);
+        return (
+          <div style={{ display: "flex", flexDirection: "column", gap: "2px", maxWidth: "150px" }}>
+            <div style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>
+              <Badge variant={node.ipinfo.is_broadcast ? "warning" : "success"}>{labels.native}</Badge>
+              <Badge variant={node.ipinfo.is_residential ? "success" : "neutral"}>{labels.usage}</Badge>
+            </div>
+            <small
+              title={`AS${node.ipinfo.asn} ${node.ipinfo.as_organization}`}
+              style={{
+                color: riskScoreColor(node.ipinfo.fraud_score),
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {t("风险 {{score}}", { score: node.ipinfo.fraud_score })} · AS{node.ipinfo.asn}
+            </small>
+          </div>
+        );
+      },
+    }),
+    col.display({
       id: "reference_latency_ms",
       header: t("参考延迟"),
       cell: (info) => {
@@ -655,6 +763,15 @@ export function NodesPage() {
               disabled={isProbePending(node.node_hash, "latency")}
             >
               <Zap size={14} />
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              title={t("触发 IP 画像探测")}
+              onClick={() => void runProbeIPInfo(node.node_hash)}
+              disabled={isProbePending(node.node_hash, "ipinfo")}
+            >
+              <Shield size={14} />
             </Button>
           </div>
         );
@@ -952,6 +1069,70 @@ export function NodesPage() {
 
               <section className="platform-drawer-section">
                 <div className="platform-drawer-section-head">
+                  <h4>{t("IP 画像")}</h4>
+                  <p>{t("来自 IPPure 的出口 IP 位置、ASN、风险系数与 IP 纯净度。")}</p>
+                </div>
+                {(() => {
+                  const info = detailNode.ipinfo;
+                  if (!info) {
+                    return (
+                      <p className="muted">
+                        {t("暂无 IP 画像数据，可在下方触发探测。")}
+                      </p>
+                    );
+                  }
+                  const labels = ipPurityLabels(info, t);
+                  const place = [info.city, info.region, info.country_code ? info.country_code.toUpperCase() : ""]
+                    .filter(Boolean)
+                    .join(", ");
+                  return (
+                    <div className="stats-grid">
+                      <div>
+                        <span>{t("IP 属性")}</span>
+                        <div style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>
+                          <Badge variant={riskLevelBadgeVariant(info.risk_level)}>
+                            {labels.native} · {labels.usage}
+                          </Badge>
+                        </div>
+                      </div>
+                      <div>
+                        <span>{t("风险系数")}</span>
+                        <p style={{ color: riskScoreColor(info.fraud_score), fontWeight: 600 }}>
+                          {info.fraud_score} / 100
+                        </p>
+                      </div>
+                      <div>
+                        <span>{t("ASN")}</span>
+                        <p title={info.as_organization}>
+                          AS{info.asn || "-"}
+                          {info.as_organization ? ` · ${info.as_organization}` : ""}
+                        </p>
+                      </div>
+                      <div>
+                        <span>{t("位置")}</span>
+                        <p>{place || "-"}</p>
+                      </div>
+                      <div>
+                        <span>{t("时区")}</span>
+                        <p>{info.timezone || "-"}</p>
+                      </div>
+                      <div>
+                        <span>{t("坐标")}</span>
+                        <p>
+                          {info.latitude && info.longitude ? `${info.latitude}, ${info.longitude}` : "-"}
+                        </p>
+                      </div>
+                      <div>
+                        <span>{t("更新时间")}</span>
+                        <p>{formatDateTime(info.updated_at || detailNode.last_ipinfo_probe_attempt || "")}</p>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </section>
+
+              <section className="platform-drawer-section">
+                <div className="platform-drawer-section-head">
                   <h4>{t("节点别名")}</h4>
                 </div>
                 {!detailNode.tags.length ? (
@@ -998,6 +1179,21 @@ export function NodesPage() {
                       disabled={isProbePending(detailNode.node_hash, "latency")}
                     >
                       {isProbePending(detailNode.node_hash, "latency") ? t("探测中...") : t("触发延迟探测")}
+                    </Button>
+                  </div>
+                  <div className="platform-op-item">
+                    <div className="platform-op-copy">
+                      <h5>{t("IP 画像探测")}</h5>
+                      <p className="platform-op-hint">
+                        {t("通过节点访问 IPPure，获取出口 IP 的位置、ASN、风险系数与纯净度。")}
+                      </p>
+                    </div>
+                    <Button
+                      variant="secondary"
+                      onClick={() => void runProbeIPInfo(detailNode.node_hash)}
+                      disabled={isProbePending(detailNode.node_hash, "ipinfo")}
+                    >
+                      {isProbePending(detailNode.node_hash, "ipinfo") ? t("探测中...") : t("触发 IP 画像探测")}
                     </Button>
                   </div>
                 </div>

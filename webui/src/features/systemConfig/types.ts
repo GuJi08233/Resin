@@ -11,6 +11,9 @@ export type RuntimeConfig = {
   max_egress_test_interval: string;
   latency_test_url: string;
   latency_authorities: string[];
+  ipinfo_probe_enabled: boolean;
+  ipinfo_probe_url: string;
+  max_ipinfo_test_interval: string;
   warp_enabled: boolean;
   warp_stack: "ipv4" | "ipv6" | "dual";
   warp_exits_per_family: number;

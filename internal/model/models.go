@@ -10,11 +10,11 @@ type Platform struct {
 	StickyTTLNs                      int64  `json:"sticky_ttl_ns"`
 	RegexFilters                     []string
 	RegionFilters                    []string
-	ReverseProxyMissAction           string `json:"reverse_proxy_miss_action"`
-	ReverseProxyEmptyAccountBehavior string `json:"reverse_proxy_empty_account_behavior"`
-	ReverseProxyFixedAccountHeader   string `json:"reverse_proxy_fixed_account_header"`
-	AllocationPolicy                 string `json:"allocation_policy"`
-	PassiveCircuitBreakerDisabled    bool   `json:"passive_circuit_breaker_disabled"`
+	ReverseProxyMissAction           string                   `json:"reverse_proxy_miss_action"`
+	ReverseProxyEmptyAccountBehavior string                   `json:"reverse_proxy_empty_account_behavior"`
+	ReverseProxyFixedAccountHeader   string                   `json:"reverse_proxy_fixed_account_header"`
+	AllocationPolicy                 string                   `json:"allocation_policy"`
+	PassiveCircuitBreakerDisabled    bool                     `json:"passive_circuit_breaker_disabled"`
 	StatusCodeRules                  []PlatformStatusCodeRule `json:"status_code_rules"`
 	UpdatedAtNs                      int64                    `json:"updated_at_ns"`
 }
@@ -97,6 +97,10 @@ type NodeDynamic struct {
 	LastLatencyProbeAttemptNs          int64  `json:"last_latency_probe_attempt_ns"`
 	LastAuthorityLatencyProbeAttemptNs int64  `json:"last_authority_latency_probe_attempt_ns"`
 	LastEgressUpdateAttemptNs          int64  `json:"last_egress_update_attempt_ns"`
+	// IPInfoJSON is the last successful IPPure reputation sample, JSON-encoded.
+	// Empty when the node has no stored profile.
+	IPInfoJSON               string `json:"ipinfo_json"`
+	LastIPInfoProbeAttemptNs int64  `json:"last_ipinfo_probe_attempt_ns"`
 }
 
 // NodeLatency holds per-domain latency statistics for a node.

@@ -4,6 +4,32 @@ export type NodeTag = {
   tag: string;
 };
 
+export type NodeIPInfo = {
+  ip: string;
+  asn: number;
+  as_organization: string;
+  country: string;
+  country_code: string;
+  region: string;
+  region_code: string;
+  city: string;
+  timezone: string;
+  latitude: string;
+  longitude: string;
+  postal_code: string;
+  fraud_score: number;
+  risk_level:
+    | "very_clean"
+    | "clean"
+    | "neutral"
+    | "light_risk"
+    | "medium_risk"
+    | "high_risk";
+  is_residential: boolean;
+  is_broadcast: boolean;
+  updated_at: string;
+};
+
 export type NodeSummary = {
   node_hash: string;
   parent_hash?: string;
@@ -16,6 +42,8 @@ export type NodeSummary = {
   circuit_open_since?: string;
   failure_count: number;
   egress_ip?: string;
+  ipinfo?: NodeIPInfo;
+  last_ipinfo_probe_attempt?: string;
   reference_latency_ms?: number;
   region?: string;
   last_egress_update?: string;

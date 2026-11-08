@@ -826,6 +826,35 @@ Note: Once enabled, requests without authentication information are rejected ins
     "Leave empty to match only the start status code; fill it to match an inclusive range.",
   "支持单个状态码或区间：结束码留空表示只匹配起始码，填写后按闭区间匹配。":
     "Supports a single status code or an inclusive range: leave the end code empty to match only the start code.",
+  "IP 属性": "IP type",
+  "原生 IP": "Native IP",
+  "广播 IP": "Broadcast IP",
+  "住宅 IP": "Residential IP",
+  "机房 IP": "Hosting IP",
+  "风险 {{score}}": "Risk {{score}}",
+  "IP 画像": "IP profile",
+  "IP 画像探测": "IP profile probe",
+  "触发 IP 画像探测": "Trigger IP profile probe",
+  "IP 画像探测完成：{{ip}} · AS{{asn}} · 风险 {{score}}":
+    "IP profile probe complete: {{ip}} · AS{{asn}} · risk {{score}}",
+  "来自 IPPure 的出口 IP 位置、ASN、风险系数与 IP 纯净度。":
+    "Egress IP location, ASN, risk score, and purity reported by IPPure.",
+  "暂无 IP 画像数据，可在下方触发探测。": "No IP profile yet. Trigger a probe below.",
+  "风险系数": "Risk score",
+  "位置": "Location",
+  "时区": "Timezone",
+  "坐标": "Coordinates",
+  "更新时间": "Updated at",
+  "通过节点访问 IPPure，获取出口 IP 的位置、ASN、风险系数与纯净度。":
+    "Reach IPPure through the node to fetch the egress IP's location, ASN, risk score, and purity.",
+  "IP 画像探测（IPPure）": "IP profile probe (IPPure)",
+  "启用 IP 画像探测": "Enable IP profile probe",
+  "IP 画像探测接口": "IP profile probe endpoint",
+  "IP 画像最大探测间隔": "Max IP profile probe interval",
+  "启用后通过每个节点访问 IPPure 公开接口，采集出口 IP 的位置、ASN、风险系数与纯净度。关闭时仍可在节点详情里手动触发单次探测。":
+    "When enabled, Resin queries the public IPPure endpoint through each node to collect the egress IP's location, ASN, risk score, and purity. Disabling it still allows one-off probes from node details.",
+  "IP 画像探测接口不能为空": "IP profile probe endpoint must not be empty",
+  "IP 画像探测接口必须是 http/https 地址": "IP profile probe endpoint must be an http/https URL",
 };
 
 export function translateDocumentTitle(locale: AppLocale): string {

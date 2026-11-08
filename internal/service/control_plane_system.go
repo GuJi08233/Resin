@@ -85,6 +85,9 @@ var runtimeConfigAllowedFields = map[string]bool{
 	"max_egress_test_interval":                 true,
 	"latency_test_url":                         true,
 	"latency_authorities":                      true,
+	"ipinfo_probe_enabled":                     true,
+	"ipinfo_probe_url":                         true,
+	"max_ipinfo_test_interval":                 true,
 	"warp_enabled":                             true,
 	"warp_stack":                               true,
 	"warp_exits_per_family":                    true,
@@ -249,6 +252,18 @@ func validateRuntimeConfig(cfg *config.RuntimeConfig) *ServiceError {
 	}
 	if time.Duration(cfg.MaxEgressTestInterval) < minProbeInterval {
 		return invalidArg("max_egress_test_interval: must be >= 30s")
+	}
+	if time.Duration(cfg.MaxIPInfoTestInterval) < minProbeInterval {
+		return invalidArg("max_ipinfo_test_interval: must be >= 30s")
+	}
+	// Empty IPInfoProbeURL falls back to the built-in IPPure endpoint.
+	if ipInfoURL := strings.TrimSpace(cfg.IPInfoProbeURL); ipInfoURL != "" {
+		if _, verr := parseHTTPAbsoluteURL("ipinfo_probe_url", ipInfoURL); verr != nil {
+			return verr
+		}
+		cfg.IPInfoProbeURL = ipInfoURL
+	} else {
+		cfg.IPInfoProbeURL = "https://my.ippure.com/v1/info"
 	}
 	if cfg.P2CLatencyWindow < 0 {
 		return invalidArg("p2c_latency_window: must be non-negative")
