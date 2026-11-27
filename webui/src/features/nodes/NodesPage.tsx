@@ -20,7 +20,7 @@ import type { Platform } from "../platforms/types";
 import { listSubscriptions } from "../subscriptions/api";
 import { getNode, listNodes, probeEgress, probeIPInfo, probeLatency } from "./api";
 import type { NodeIPInfo, NodeSummary } from "./types";
-import { getAllRegions, getRegionName } from "./regions";
+import { getAllContinents, getAllRegions, getRegionName } from "./regions";
 import type {
   NodeIPInfoPresenceFilter,
   NodeIPTypeFilter,
@@ -38,6 +38,7 @@ type NodeFilterDraft = {
   platform_id: string;
   subscription_id: string;
   tag_keyword: string;
+  continent: string;
   region: string;
   egress_ip: string;
   status: NodeStatusFilter;
@@ -47,12 +48,16 @@ type NodeFilterDraft = {
   min_fraud_score: string;
   max_fraud_score: string;
   asn: string;
+  min_latency_ms: string;
+  max_latency_ms: string;
+  has_latency: boolean | undefined;
 };
 
 const defaultFilterDraft: NodeFilterDraft = {
   platform_id: "",
   subscription_id: "",
   tag_keyword: "",
+  continent: "",
   region: "",
   egress_ip: "",
   status: "all",
@@ -62,6 +67,9 @@ const defaultFilterDraft: NodeFilterDraft = {
   min_fraud_score: "",
   max_fraud_score: "",
   asn: "",
+  min_latency_ms: "",
+  max_latency_ms: "",
+  has_latency: undefined,
 };
 
 function parseIPTypeParam(value: string | null): NodeIPTypeFilter {
@@ -81,6 +89,19 @@ function parseScoreInput(raw: string): number | undefined {
   }
   const value = Number(trimmed);
   if (!Number.isInteger(value) || value < 0 || value > 100) {
+    return undefined;
+  }
+  return value;
+}
+
+// parseLatencyInput keeps only a valid non-negative integer in milliseconds.
+function parseLatencyInput(raw: string): number | undefined {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  const value = Number(trimmed);
+  if (!Number.isInteger(value) || value < 0) {
     return undefined;
   }
   return value;
@@ -171,6 +192,7 @@ function draftFromQuery(search: string): NodeFilterDraft {
     platform_id: trimQueryValue(params, "platform_id"),
     subscription_id: trimQueryValue(params, "subscription_id"),
     tag_keyword: tagKeyword,
+    continent: trimQueryValue(params, "continent").toLowerCase(),
     region: trimQueryValue(params, "region").toUpperCase(),
     egress_ip: trimQueryValue(params, "egress_ip"),
     status: statusFromQuery(params),
@@ -185,6 +207,9 @@ function draftFromQuery(search: string): NodeFilterDraft {
     min_fraud_score: trimQueryValue(params, "min_fraud_score"),
     max_fraud_score: trimQueryValue(params, "max_fraud_score"),
     asn: trimQueryValue(params, "asn"),
+    min_latency_ms: trimQueryValue(params, "min_latency_ms"),
+    max_latency_ms: trimQueryValue(params, "max_latency_ms"),
+    has_latency: parseBoolParam(params.get("has_latency")),
   };
 }
 
@@ -225,10 +250,21 @@ function draftToActiveFilters(draft: NodeFilterDraft): NodeListFilters {
     has_ipinfo = false;
   }
 
+  const minLatency = parseLatencyInput(draft.min_latency_ms);
+  const maxLatency = parseLatencyInput(draft.max_latency_ms);
+  // Avoid firing an invalid min > max query while the user is typing both bounds.
+  const validLatencyRange =
+    minLatency === undefined || maxLatency === undefined || minLatency <= maxLatency;
+  const minFraud = parseScoreInput(draft.min_fraud_score);
+  const maxFraud = parseScoreInput(draft.max_fraud_score);
+  const validFraudRange =
+    minFraud === undefined || maxFraud === undefined || minFraud <= maxFraud;
+
   return {
     platform_id: draft.platform_id,
     subscription_id: draft.subscription_id,
     tag_keyword: draft.tag_keyword,
+    continent: draft.continent || undefined,
     region: draft.region,
     egress_ip: draft.egress_ip,
     enabled,
@@ -236,10 +272,13 @@ function draftToActiveFilters(draft: NodeFilterDraft): NodeListFilters {
     has_outbound,
     ip_type: draft.ip_type === "any" ? undefined : draft.ip_type,
     native: draft.native === "any" ? undefined : draft.native,
-    min_fraud_score: parseScoreInput(draft.min_fraud_score),
-    max_fraud_score: parseScoreInput(draft.max_fraud_score),
+    min_fraud_score: validFraudRange ? minFraud : undefined,
+    max_fraud_score: validFraudRange ? maxFraud : undefined,
     asn: draft.asn.trim() || undefined,
     has_ipinfo,
+    min_latency_ms: validLatencyRange ? minLatency : undefined,
+    max_latency_ms: validLatencyRange ? maxLatency : undefined,
+    has_latency: draft.has_latency,
   };
 }
 
@@ -390,6 +429,7 @@ export function NodesPage() {
 
   const queryClient = useQueryClient();
 
+  const allContinents = useMemo(() => getAllContinents(), [locale]);
   const allRegions = useMemo(() => getAllRegions(), [locale]);
 
   const platformsQuery = useQuery({
@@ -744,7 +784,12 @@ export function NodesPage() {
     }),
     col.display({
       id: "reference_latency_ms",
-      header: t("参考延迟"),
+      header: () => (
+        <button type="button" className="table-sort-btn" onClick={() => changeSort("latency")}>
+          {t("参考延迟")}
+          <span>{sortIndicator(sortBy === "latency", sortOrder)}</span>
+        </button>
+      ),
       cell: (info) => {
         const node = info.row.original;
         const latencyMs = displayableReferenceLatencyMs(node);
@@ -928,6 +973,25 @@ export function NodesPage() {
             </div>
 
             <div style={NODE_FILTER_ITEM_STYLE}>
+              <label htmlFor="node-continent" style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+                {t("大区")}
+              </label>
+              <Select
+                id="node-continent"
+                value={draftFilters.continent}
+                onChange={(event) => handleFilterChange("continent", event.target.value)}
+                style={NODE_FILTER_CONTROL_STYLE}
+              >
+                <option value="">{t("全部")}</option>
+                {allContinents.map((c) => (
+                  <option key={c.code} value={c.code}>
+                    {c.label} ({c.code.toUpperCase()})
+                  </option>
+                ))}
+              </Select>
+            </div>
+
+            <div style={NODE_FILTER_ITEM_STYLE}>
               <label htmlFor="node-region" style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
                 {t("区域")}
               </label>
@@ -1023,6 +1087,34 @@ export function NodesPage() {
                 <option value="with">{t("已探测")}</option>
                 <option value="without">{t("未探测")}</option>
               </Select>
+            </div>
+
+            <div style={NODE_FILTER_ITEM_STYLE}>
+              <label htmlFor="node-latency-ms" style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+                {t("延迟 (ms)")}
+              </label>
+              <div style={{ display: "flex", alignItems: "center", gap: "0.25rem" }}>
+                <Input
+                  id="node-latency-ms"
+                  type="number"
+                  min={0}
+                  placeholder={t("最小")}
+                  value={draftFilters.min_latency_ms}
+                  onChange={(event) => handleFilterChange("min_latency_ms", event.target.value)}
+                  style={NODE_FILTER_CONTROL_STYLE}
+                  aria-label={t("最小参考延迟 (ms)")}
+                />
+                <span style={{ color: "var(--text-secondary)" }}>~</span>
+                <Input
+                  type="number"
+                  min={0}
+                  placeholder={t("最大")}
+                  value={draftFilters.max_latency_ms}
+                  onChange={(event) => handleFilterChange("max_latency_ms", event.target.value)}
+                  style={NODE_FILTER_CONTROL_STYLE}
+                  aria-label={t("最大参考延迟 (ms)")}
+                />
+              </div>
             </div>
 
             <div style={NODE_FILTER_ITEM_STYLE}>

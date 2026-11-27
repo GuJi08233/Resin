@@ -268,3 +268,103 @@ func TestPreviewFilter_IPInfoFilters(t *testing.T) {
 		t.Fatal("expected invalid ip_type to be rejected")
 	}
 }
+
+func TestPreviewFilter_ContinentAndLatencyFilters(t *testing.T) {
+	subMgr := topology.NewSubscriptionManager()
+	sub := subscription.NewSubscription("sub-1", "sub-1", "https://example.com/sub", true, false)
+	subMgr.Register(sub)
+
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              func(netip.Addr) string { return "" },
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+		LatencyAuthorities:     func() []string { return []string{"gstatic.com"} },
+	})
+
+	add := func(server, tag, region string, latMs int) string {
+		raw := []byte(`{"type":"ss","server":"` + server + `","port":443}`)
+		h := node.HashFromRawOptions(raw)
+		pool.AddNodeFromSub(h, raw, sub.ID)
+		sub.ManagedNodes().StoreNode(h, subscription.ManagedNode{Tags: []string{tag}})
+		e, _ := pool.GetEntry(h)
+		ob := testutil.NewNoopOutbound()
+		e.Outbound.Store(&ob)
+		e.SetEgressIP(netip.MustParseAddr(server))
+		if region != "" {
+			e.SetEgressRegion(region)
+		}
+		if latMs > 0 {
+			e.LatencyTable.LoadEntry("gstatic.com", node.DomainLatencyStats{
+				Ewma:        time.Duration(latMs) * time.Millisecond,
+				LastUpdated: time.Now(),
+			})
+		}
+		return h.Hex()
+	}
+
+	hkFast := add("1.1.1.1", "hk-fast", "hk", 60)
+	deSlow := add("2.2.2.2", "de-slow", "de", 320)
+	_ = add("3.3.3.3", "us-nolat", "us", 0)
+
+	cp := &ControlPlaneService{Pool: pool, SubMgr: subMgr}
+
+	// Continent filter: Asia only.
+	nodes, err := cp.PreviewFilter(PreviewFilterRequest{
+		PlatformSpec: &PlatformSpecFilter{
+			RegexFilters:     []string{".*"},
+			ContinentFilters: []string{"as"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("PreviewFilter continent: %v", err)
+	}
+	if len(nodes) != 1 || nodes[0].NodeHash != hkFast {
+		t.Fatalf("continent=as nodes = %+v, want only %s", nodes, hkFast)
+	}
+
+	// Latency filter: max_ms = 200 excludes deSlow and us-nolat.
+	maxMs := 200
+	nodes, err = cp.PreviewFilter(PreviewFilterRequest{
+		PlatformSpec: &PlatformSpecFilter{
+			RegexFilters:   []string{".*"},
+			LatencyFilters: &LatencyFilterRequest{MaxMs: &maxMs},
+		},
+	})
+	if err != nil {
+		t.Fatalf("PreviewFilter latency: %v", err)
+	}
+	if len(nodes) != 1 || nodes[0].NodeHash != hkFast {
+		t.Fatalf("max_ms=200 nodes = %+v, want only %s", nodes, hkFast)
+	}
+
+	// Combined continent + latency.
+	minMs := 200
+	nodes, err = cp.PreviewFilter(PreviewFilterRequest{
+		PlatformSpec: &PlatformSpecFilter{
+			RegexFilters:     []string{".*"},
+			ContinentFilters: []string{"eu"},
+			LatencyFilters:   &LatencyFilterRequest{MinMs: &minMs},
+		},
+	})
+	if err != nil {
+		t.Fatalf("PreviewFilter combined: %v", err)
+	}
+	if len(nodes) != 1 || nodes[0].NodeHash != deSlow {
+		t.Fatalf("combined nodes = %+v, want only %s", nodes, deSlow)
+	}
+
+	// Invalid continent / latency rejected.
+	if _, err := cp.PreviewFilter(PreviewFilterRequest{
+		PlatformSpec: &PlatformSpecFilter{ContinentFilters: []string{"invalid"}},
+	}); err == nil {
+		t.Fatal("expected invalid continent to be rejected")
+	}
+	badMin, badMax := 500, 100
+	if _, err := cp.PreviewFilter(PreviewFilterRequest{
+		PlatformSpec: &PlatformSpecFilter{LatencyFilters: &LatencyFilterRequest{MinMs: &badMin, MaxMs: &badMax}},
+	}); err == nil {
+		t.Fatal("expected min_ms > max_ms to be rejected")
+	}
+}

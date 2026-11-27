@@ -17,20 +17,26 @@ import (
 
 // NodeFilters holds query filters for listing nodes.
 type NodeFilters struct {
-	PlatformID     *string
-	SubscriptionID *string
-	Enabled        *bool
-	Region         *string
-	CircuitOpen    *bool
-	HasOutbound    *bool
-	EgressIP       *string
-	ProbedSince    *time.Time
-	TagKeyword     *string
+	PlatformID       *string
+	SubscriptionID   *string
+	Enabled          *bool
+	Region           *string
+	ContinentFilters []string
+	CircuitOpen      *bool
+	HasOutbound      *bool
+	EgressIP         *string
+	ProbedSince      *time.Time
+	TagKeyword       *string
 
 	// IP profile filters, matched against the node's IPPure sample.
 	// Nodes without a sample never match an active profile filter.
 	IPInfoFilters platform.IPInfoFilter
 	HasIPInfo     *bool
+
+	// Reference latency filters, matched against average authority EWMA (ms).
+	// Nodes without a reference latency never match an active latency filter.
+	LatencyFilters platform.LatencyFilter
+	HasLatency     *bool
 }
 
 // ListNodes returns nodes from the pool with optional filters.
@@ -168,13 +174,16 @@ func (s *ControlPlaneService) nodeEntryMatchesFilters(
 		}
 	}
 
-	// Region filter.
-	if filters.Region != nil {
+	// Region and continent filters.
+	if filters.Region != nil || len(filters.ContinentFilters) > 0 {
 		region := entry.GetRegion(nil)
 		if s.GeoIP != nil {
 			region = entry.GetRegion(s.GeoIP.Lookup)
 		}
-		if region == "" || region != *filters.Region {
+		if filters.Region != nil && (region == "" || region != *filters.Region) {
+			return false
+		}
+		if len(filters.ContinentFilters) > 0 && !platform.MatchContinentFilter(region, filters.ContinentFilters) {
 			return false
 		}
 	}
@@ -214,6 +223,16 @@ func (s *ControlPlaneService) nodeEntryMatchesFilters(
 	// IP profile filter.
 	if filters.IPInfoFilters.Active() && !filters.IPInfoFilters.Match(ipInfo) {
 		return false
+	}
+	// Reference latency presence and range filters.
+	if filters.HasLatency != nil || filters.LatencyFilters.Active() {
+		latencyMs, hasLatency := s.referenceLatencyMs(entry)
+		if filters.HasLatency != nil && hasLatency != *filters.HasLatency {
+			return false
+		}
+		if filters.LatencyFilters.Active() && !filters.LatencyFilters.Match(latencyMs, hasLatency) {
+			return false
+		}
 	}
 	return true
 }

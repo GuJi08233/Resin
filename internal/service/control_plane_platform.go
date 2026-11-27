@@ -29,7 +29,9 @@ type PlatformResponse struct {
 	StickyTTL                        string                   `json:"sticky_ttl"`
 	RegexFilters                     []string                 `json:"regex_filters"`
 	RegionFilters                    []string                 `json:"region_filters"`
+	ContinentFilters                 []string                 `json:"continent_filters"`
 	IPInfoFilters                    IPInfoFilterResponse     `json:"ipinfo_filters"`
+	LatencyFilters                   LatencyFilterResponse    `json:"latency_filters"`
 	RoutableNodeCount                int                      `json:"routable_node_count"`
 	ReverseProxyMissAction           string                   `json:"reverse_proxy_miss_action"`
 	ReverseProxyEmptyAccountBehavior string                   `json:"reverse_proxy_empty_account_behavior"`
@@ -38,6 +40,25 @@ type PlatformResponse struct {
 	PassiveCircuitBreakerDisabled    bool                     `json:"passive_circuit_breaker_disabled"`
 	StatusCodeRules                  []StatusCodeRuleResponse `json:"status_code_rules"`
 	UpdatedAt                        string                   `json:"updated_at"`
+}
+
+// LatencyFilterResponse is the API representation of the platform latency filter.
+type LatencyFilterResponse struct {
+	MinMs *int `json:"min_ms"`
+	MaxMs *int `json:"max_ms"`
+}
+
+func latencyFiltersToResponse(filter model.PlatformLatencyFilter) LatencyFilterResponse {
+	var resp LatencyFilterResponse
+	if filter.MinMs != nil {
+		v := *filter.MinMs
+		resp.MinMs = &v
+	}
+	if filter.MaxMs != nil {
+		v := *filter.MaxMs
+		resp.MaxMs = &v
+	}
+	return resp
 }
 
 // IPInfoFilterResponse is the API representation of the platform IP profile filter.
@@ -96,13 +117,19 @@ func statusCodeRulesToResponse(rules []model.PlatformStatusCodeRule) []StatusCod
 func platformToResponse(p model.Platform) PlatformResponse {
 	behavior := normalizePlatformEmptyAccountBehavior(p.ReverseProxyEmptyAccountBehavior)
 	fixedHeader := normalizeHeaderFieldName(p.ReverseProxyFixedAccountHeader)
+	continentFilters := append([]string(nil), p.ContinentFilters...)
+	if continentFilters == nil {
+		continentFilters = []string{}
+	}
 	return PlatformResponse{
 		ID:                               p.ID,
 		Name:                             p.Name,
 		StickyTTL:                        time.Duration(p.StickyTTLNs).String(),
 		RegexFilters:                     append([]string(nil), p.RegexFilters...),
 		RegionFilters:                    append([]string(nil), p.RegionFilters...),
+		ContinentFilters:                 continentFilters,
 		IPInfoFilters:                    ipInfoFiltersToResponse(p.IPInfoFilters),
+		LatencyFilters:                   latencyFiltersToResponse(p.LatencyFilters),
 		RoutableNodeCount:                0,
 		ReverseProxyMissAction:           p.ReverseProxyMissAction,
 		ReverseProxyEmptyAccountBehavior: behavior,
@@ -131,7 +158,9 @@ type platformConfig struct {
 	StickyTTLNs                      int64
 	RegexFilters                     []string
 	RegionFilters                    []string
+	ContinentFilters                 []string
 	IPInfoFilters                    model.PlatformIPInfoFilter
+	LatencyFilters                   model.PlatformLatencyFilter
 	ReverseProxyMissAction           string
 	ReverseProxyEmptyAccountBehavior string
 	ReverseProxyFixedAccountHeader   string
@@ -169,7 +198,9 @@ func (s *ControlPlaneService) defaultPlatformConfig(name string) platformConfig 
 			s.EnvCfg.DefaultPlatformReverseProxyFixedAccountHeader,
 		),
 		AllocationPolicy: s.EnvCfg.DefaultPlatformAllocationPolicy,
+		ContinentFilters: []string{},
 		IPInfoFilters:    model.PlatformIPInfoFilter{ASNs: []string{}},
+		LatencyFilters:   model.PlatformLatencyFilter{},
 		StatusCodeRules:  []platform.StatusCodeRule{},
 	}
 }
@@ -184,7 +215,9 @@ func platformConfigFromModel(mp model.Platform) (platformConfig, error) {
 		StickyTTLNs:                      mp.StickyTTLNs,
 		RegexFilters:                     append([]string(nil), mp.RegexFilters...),
 		RegionFilters:                    append([]string(nil), mp.RegionFilters...),
+		ContinentFilters:                 append([]string(nil), mp.ContinentFilters...),
 		IPInfoFilters:                    mp.IPInfoFilters,
+		LatencyFilters:                   mp.LatencyFilters,
 		ReverseProxyMissAction:           mp.ReverseProxyMissAction,
 		ReverseProxyEmptyAccountBehavior: normalizePlatformEmptyAccountBehavior(mp.ReverseProxyEmptyAccountBehavior),
 		ReverseProxyFixedAccountHeader:   normalizeHeaderFieldName(mp.ReverseProxyFixedAccountHeader),
@@ -201,7 +234,9 @@ func (cfg platformConfig) toModel(id string, updatedAtNs int64) model.Platform {
 		StickyTTLNs:                      cfg.StickyTTLNs,
 		RegexFilters:                     append([]string(nil), cfg.RegexFilters...),
 		RegionFilters:                    append([]string(nil), cfg.RegionFilters...),
+		ContinentFilters:                 append([]string(nil), cfg.ContinentFilters...),
 		IPInfoFilters:                    cfg.IPInfoFilters,
+		LatencyFilters:                   cfg.LatencyFilters,
 		ReverseProxyMissAction:           cfg.ReverseProxyMissAction,
 		ReverseProxyEmptyAccountBehavior: cfg.ReverseProxyEmptyAccountBehavior,
 		ReverseProxyFixedAccountHeader:   cfg.ReverseProxyFixedAccountHeader,
@@ -217,7 +252,15 @@ func (cfg platformConfig) toRuntime(id string) (*platform.Platform, error) {
 	if err != nil {
 		return nil, err
 	}
+	normalizedContinentFilters, err := platform.NormalizeContinentFilters(cfg.ContinentFilters)
+	if err != nil {
+		return nil, err
+	}
 	compiledIPInfoFilters, err := platform.CompileIPInfoFilter(cfg.IPInfoFilters)
+	if err != nil {
+		return nil, err
+	}
+	compiledLatencyFilters, err := platform.CompileLatencyFilter(cfg.LatencyFilters)
 	if err != nil {
 		return nil, err
 	}
@@ -233,7 +276,9 @@ func (cfg platformConfig) toRuntime(id string) (*platform.Platform, error) {
 		cfg.AllocationPolicy,
 		cfg.PassiveCircuitBreakerDisabled,
 	)
+	plat.ContinentFilters = normalizedContinentFilters
 	plat.IPInfoFilters = compiledIPInfoFilters
+	plat.LatencyFilters = compiledLatencyFilters
 	plat.StatusCodeRules = append([]platform.StatusCodeRule(nil), cfg.StatusCodeRules...)
 	return plat, nil
 }
@@ -340,11 +385,21 @@ func validatePlatformConfig(cfg *platformConfig, validateRegionFilters bool) *Se
 			return invalidArg(err.Error())
 		}
 	}
+	normalizedContinentFilters, err := platform.NormalizeContinentFilters(cfg.ContinentFilters)
+	if err != nil {
+		return invalidArg(err.Error())
+	}
+	cfg.ContinentFilters = normalizedContinentFilters
 	normalizedIPInfoFilters, err := platform.NormalizeIPInfoFilter(cfg.IPInfoFilters)
 	if err != nil {
 		return invalidArg(err.Error())
 	}
 	cfg.IPInfoFilters = normalizedIPInfoFilters
+	normalizedLatencyFilters, err := platform.NormalizeLatencyFilter(cfg.LatencyFilters)
+	if err != nil {
+		return invalidArg(err.Error())
+	}
+	cfg.LatencyFilters = normalizedLatencyFilters
 	if err := validatePlatformEmptyAccountConfig(cfg); err != nil {
 		return err
 	}
@@ -451,13 +506,52 @@ type CreatePlatformRequest struct {
 	StickyTTL                        *string                 `json:"sticky_ttl"`
 	RegexFilters                     []string                `json:"regex_filters"`
 	RegionFilters                    []string                `json:"region_filters"`
+	ContinentFilters                 []string                `json:"continent_filters"`
 	IPInfoFilters                    *IPInfoFilterRequest    `json:"ipinfo_filters"`
+	LatencyFilters                   *LatencyFilterRequest   `json:"latency_filters"`
 	ReverseProxyMissAction           *string                 `json:"reverse_proxy_miss_action"`
 	ReverseProxyEmptyAccountBehavior *string                 `json:"reverse_proxy_empty_account_behavior"`
 	ReverseProxyFixedAccountHeader   *string                 `json:"reverse_proxy_fixed_account_header"`
 	AllocationPolicy                 *string                 `json:"allocation_policy"`
 	PassiveCircuitBreakerDisabled    *bool                   `json:"passive_circuit_breaker_disabled"`
 	StatusCodeRules                  []StatusCodeRuleRequest `json:"status_code_rules"`
+}
+
+// LatencyFilterRequest is the API input shape for the platform latency filter.
+type LatencyFilterRequest struct {
+	MinMs *int `json:"min_ms"`
+	MaxMs *int `json:"max_ms"`
+}
+
+func (r LatencyFilterRequest) toModel() model.PlatformLatencyFilter {
+	var out model.PlatformLatencyFilter
+	if r.MinMs != nil {
+		v := *r.MinMs
+		out.MinMs = &v
+	}
+	if r.MaxMs != nil {
+		v := *r.MaxMs
+		out.MaxMs = &v
+	}
+	return out
+}
+
+func (p mergePatch) optionalLatencyFilterRequest(field string) (LatencyFilterRequest, bool, *ServiceError) {
+	raw, ok := p[field]
+	if !ok {
+		return LatencyFilterRequest{}, false, nil
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return LatencyFilterRequest{}, true, invalidArg(fmt.Sprintf("%s: invalid value", field))
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	var filter LatencyFilterRequest
+	if err := dec.Decode(&filter); err != nil {
+		return LatencyFilterRequest{}, true, invalidArg(fmt.Sprintf("%s: %v", field, err))
+	}
+	return filter, true, nil
 }
 
 // IPInfoFilterRequest is the API input shape for the platform IP profile filter.
@@ -535,8 +629,14 @@ func (s *ControlPlaneService) CreatePlatform(req CreatePlatformRequest) (*Platfo
 	if req.RegionFilters != nil {
 		cfg.RegionFilters = req.RegionFilters
 	}
+	if req.ContinentFilters != nil {
+		cfg.ContinentFilters = req.ContinentFilters
+	}
 	if req.IPInfoFilters != nil {
 		cfg.IPInfoFilters = req.IPInfoFilters.toModel()
+	}
+	if req.LatencyFilters != nil {
+		cfg.LatencyFilters = req.LatencyFilters.toModel()
 	}
 	if req.ReverseProxyMissAction != nil {
 		if err := setPlatformMissAction(&cfg, *req.ReverseProxyMissAction); err != nil {
@@ -654,10 +754,22 @@ func (s *ControlPlaneService) UpdatePlatform(id string, patchJSON json.RawMessag
 		cfg.RegionFilters = filters
 	}
 
+	if filters, ok, err := patch.optionalStringSlice("continent_filters"); err != nil {
+		return nil, err
+	} else if ok {
+		cfg.ContinentFilters = filters
+	}
+
 	if filters, ok, err := patch.optionalIPInfoFilterRequest("ipinfo_filters"); err != nil {
 		return nil, err
 	} else if ok {
 		cfg.IPInfoFilters = filters.toModel()
+	}
+
+	if filters, ok, err := patch.optionalLatencyFilterRequest("latency_filters"); err != nil {
+		return nil, err
+	} else if ok {
+		cfg.LatencyFilters = filters.toModel()
 	}
 
 	if ma, ok, err := patch.optionalString("reverse_proxy_miss_action"); err != nil {
@@ -830,9 +942,11 @@ type PreviewFilterRequest struct {
 }
 
 type PlatformSpecFilter struct {
-	RegexFilters  []string             `json:"regex_filters"`
-	RegionFilters []string             `json:"region_filters"`
-	IPInfoFilters *IPInfoFilterRequest `json:"ipinfo_filters"`
+	RegexFilters     []string              `json:"regex_filters"`
+	RegionFilters    []string              `json:"region_filters"`
+	ContinentFilters []string              `json:"continent_filters"`
+	IPInfoFilters    *IPInfoFilterRequest  `json:"ipinfo_filters"`
+	LatencyFilters   *LatencyFilterRequest `json:"latency_filters"`
 }
 
 // NodeSummary is the API response for a node.
@@ -919,12 +1033,8 @@ func (s *ControlPlaneService) nodeEntryToSummary(h node.Hash, entry *node.NodeEn
 	if lastAuthority := entry.LastAuthorityLatencyProbeAttempt.Load(); lastAuthority > 0 {
 		ns.LastAuthorityLatencyProbeAttempt = time.Unix(0, lastAuthority).UTC().Format(time.RFC3339Nano)
 	}
-	if s != nil && s.RuntimeCfg != nil {
-		if cfg := s.RuntimeCfg.Load(); cfg != nil {
-			if avgMs, ok := node.AverageEWMAForDomainsMs(entry, cfg.LatencyAuthorities); ok {
-				ns.ReferenceLatencyMs = &avgMs
-			}
-		}
+	if avgMs, ok := s.referenceLatencyMs(entry); ok {
+		ns.ReferenceLatencyMs = &avgMs
 	}
 	if lastEgressAttempt := entry.LastEgressUpdateAttempt.Load(); lastEgressAttempt > 0 {
 		ns.LastEgressUpdateAttempt = time.Unix(0, lastEgressAttempt).UTC().Format(time.RFC3339Nano)
@@ -956,6 +1066,18 @@ func (s *ControlPlaneService) nodeEntryToSummary(h node.Hash, entry *node.NodeEn
 	return ns
 }
 
+func (s *ControlPlaneService) referenceLatencyMs(entry *node.NodeEntry) (float64, bool) {
+	if s != nil && s.RuntimeCfg != nil {
+		if cfg := s.RuntimeCfg.Load(); cfg != nil {
+			return node.AverageEWMAForDomainsMs(entry, cfg.LatencyAuthorities)
+		}
+	}
+	if s != nil && s.Pool != nil {
+		return s.Pool.ReferenceLatencyMs(entry)
+	}
+	return 0, false
+}
+
 // PreviewFilter returns nodes matching the given filter spec.
 func (s *ControlPlaneService) PreviewFilter(req PreviewFilterRequest) ([]NodeSummary, error) {
 	hasPlatformID := req.PlatformID != nil && *req.PlatformID != ""
@@ -967,7 +1089,9 @@ func (s *ControlPlaneService) PreviewFilter(req PreviewFilterRequest) ([]NodeSum
 
 	var regexFilters node.TagFilter
 	var regionFilters []string
+	var continentFilters []string
 	var ipInfoFilters platform.IPInfoFilter
+	var latencyFilters platform.LatencyFilter
 
 	if hasPlatformID {
 		plat, ok := s.Pool.GetPlatform(*req.PlatformID)
@@ -976,7 +1100,9 @@ func (s *ControlPlaneService) PreviewFilter(req PreviewFilterRequest) ([]NodeSum
 		}
 		regexFilters = plat.RegexFilters
 		regionFilters = plat.RegionFilters
+		continentFilters = plat.ContinentFilters
 		ipInfoFilters = plat.IPInfoFilters
+		latencyFilters = plat.LatencyFilters
 	} else {
 		compiled, err := platform.CompileRegexFilters(req.PlatformSpec.RegexFilters)
 		if err != nil {
@@ -987,12 +1113,24 @@ func (s *ControlPlaneService) PreviewFilter(req PreviewFilterRequest) ([]NodeSum
 		if err := platform.ValidateRegionFilters(regionFilters); err != nil {
 			return nil, invalidArg(err.Error())
 		}
+		normalizedContinents, err := platform.NormalizeContinentFilters(req.PlatformSpec.ContinentFilters)
+		if err != nil {
+			return nil, invalidArg(err.Error())
+		}
+		continentFilters = normalizedContinents
 		if req.PlatformSpec.IPInfoFilters != nil {
 			compiledIPInfo, err := platform.CompileIPInfoFilter(req.PlatformSpec.IPInfoFilters.toModel())
 			if err != nil {
 				return nil, invalidArg(err.Error())
 			}
 			ipInfoFilters = compiledIPInfo
+		}
+		if req.PlatformSpec.LatencyFilters != nil {
+			compiledLatency, err := platform.CompileLatencyFilter(req.PlatformSpec.LatencyFilters.toModel())
+			if err != nil {
+				return nil, invalidArg(err.Error())
+			}
+			latencyFilters = compiledLatency
 		}
 	}
 
@@ -1005,17 +1143,26 @@ func (s *ControlPlaneService) PreviewFilter(req PreviewFilterRequest) ([]NodeSum
 		if !entry.MatchTagFilter(regexFilters, subLookup) {
 			return true
 		}
-		if len(regionFilters) > 0 {
+		if len(regionFilters) > 0 || len(continentFilters) > 0 {
 			region := entry.GetRegion(nil)
 			if s.GeoIP != nil {
 				region = entry.GetRegion(s.GeoIP.Lookup)
 			}
-			if !platform.MatchRegionFilter(region, regionFilters) {
+			if len(regionFilters) > 0 && !platform.MatchRegionFilter(region, regionFilters) {
+				return true
+			}
+			if len(continentFilters) > 0 && !platform.MatchContinentFilter(region, continentFilters) {
 				return true
 			}
 		}
 		if !ipInfoFilters.Match(entry.GetEgressIPInfo()) {
 			return true
+		}
+		if latencyFilters.Active() {
+			avgMs, hasRefLatency := s.referenceLatencyMs(entry)
+			if !latencyFilters.Match(avgMs, hasRefLatency) {
+				return true
+			}
 		}
 		result = append(result, s.nodeEntryToSummary(h, entry))
 		return true

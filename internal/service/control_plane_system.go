@@ -104,7 +104,9 @@ var platformPatchAllowedFields = map[string]bool{
 	"sticky_ttl":                           true,
 	"regex_filters":                        true,
 	"region_filters":                       true,
+	"continent_filters":                    true,
 	"ipinfo_filters":                       true,
+	"latency_filters":                      true,
 	"reverse_proxy_miss_action":            true,
 	"reverse_proxy_empty_account_behavior": true,
 	"reverse_proxy_fixed_account_header":   true,
@@ -167,7 +169,12 @@ func (s *ControlPlaneService) PatchRuntimeConfig(patchJSON json.RawMessage) (*co
 	defer s.configMu.Unlock()
 
 	// 3. Deep-copy current config → apply patch.
-	newCfg := copyRuntimeConfig(s.RuntimeCfg.Load())
+	prevCfg := s.RuntimeCfg.Load()
+	var prevAuthorities []string
+	if prevCfg != nil {
+		prevAuthorities = prevCfg.LatencyAuthorities
+	}
+	newCfg := copyRuntimeConfig(prevCfg)
 	if verr := parseRuntimeConfigPatch(patchJSON, newCfg); verr != nil {
 		return nil, verr
 	}
@@ -199,8 +206,23 @@ func (s *ControlPlaneService) PatchRuntimeConfig(patchJSON json.RawMessage) (*co
 	s.RuntimeCfg.Store(newCfg)
 	s.configVersion = newVersion
 	s.syncWarpSubscriptionLocked()
+	if s.Pool != nil && !equalStringSlicesFold(prevAuthorities, newCfg.LatencyAuthorities) {
+		s.Pool.RebuildLatencyFilteredPlatforms()
+	}
 
 	return newCfg, nil
+}
+
+func equalStringSlicesFold(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !strings.EqualFold(strings.TrimSpace(a[i]), strings.TrimSpace(b[i])) {
+			return false
+		}
+	}
+	return true
 }
 
 func validateRuntimeConfig(cfg *config.RuntimeConfig) *ServiceError {

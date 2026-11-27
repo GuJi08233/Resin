@@ -589,6 +589,76 @@ func TestStateRepo_Platform_InvalidIPInfoFiltersRejected(t *testing.T) {
 	}
 }
 
+func TestStateRepo_Platform_ContinentAndLatencyFiltersRoundTrip(t *testing.T) {
+	repo := newTestStateRepo(t)
+	now := time.Now().UnixNano()
+
+	minMs, maxMs := 20, 250
+	p := model.Platform{
+		ID: "plat-cont-lat", Name: "ContinentLatency", StickyTTLNs: 1000,
+		RegexFilters:     []string{},
+		RegionFilters:    []string{"!ru"},
+		ContinentFilters: []string{"EU", "!AF"},
+		LatencyFilters: model.PlatformLatencyFilter{
+			MinMs: &minMs,
+			MaxMs: &maxMs,
+		},
+		ReverseProxyMissAction: "TREAT_AS_EMPTY", AllocationPolicy: "BALANCED",
+		UpdatedAtNs: now,
+	}
+	if err := repo.UpsertPlatform(p); err != nil {
+		t.Fatalf("UpsertPlatform: %v", err)
+	}
+
+	got, err := repo.GetPlatform(p.ID)
+	if err != nil {
+		t.Fatalf("GetPlatform: %v", err)
+	}
+	if !reflect.DeepEqual(got.ContinentFilters, []string{"eu", "!af"}) {
+		t.Fatalf("ContinentFilters = %v, want [eu !af]", got.ContinentFilters)
+	}
+	if got.LatencyFilters.MinMs == nil || *got.LatencyFilters.MinMs != 20 {
+		t.Fatalf("LatencyFilters.MinMs = %v, want 20", got.LatencyFilters.MinMs)
+	}
+	if got.LatencyFilters.MaxMs == nil || *got.LatencyFilters.MaxMs != 250 {
+		t.Fatalf("LatencyFilters.MaxMs = %v, want 250", got.LatencyFilters.MaxMs)
+	}
+
+	list, err := repo.ListPlatforms()
+	if err != nil {
+		t.Fatalf("ListPlatforms: %v", err)
+	}
+	if len(list) != 1 || !reflect.DeepEqual(list[0].ContinentFilters, []string{"eu", "!af"}) ||
+		list[0].LatencyFilters.MaxMs == nil || *list[0].LatencyFilters.MaxMs != 250 {
+		t.Fatalf("list platform = %+v", list)
+	}
+}
+
+func TestStateRepo_Platform_InvalidContinentOrLatencyFiltersRejected(t *testing.T) {
+	repo := newTestStateRepo(t)
+
+	err := repo.UpsertPlatform(model.Platform{
+		ID: "plat-bad-cont", Name: "BadContinent", StickyTTLNs: 1000,
+		ContinentFilters:       []string{"mars"},
+		ReverseProxyMissAction: "TREAT_AS_EMPTY", AllocationPolicy: "BALANCED",
+		UpdatedAtNs: time.Now().UnixNano(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "continent_filters") {
+		t.Fatalf("expected invalid continent filter error, got %v", err)
+	}
+
+	minMs, maxMs := 300, 100
+	err = repo.UpsertPlatform(model.Platform{
+		ID: "plat-bad-lat", Name: "BadLatency", StickyTTLNs: 1000,
+		LatencyFilters:         model.PlatformLatencyFilter{MinMs: &minMs, MaxMs: &maxMs},
+		ReverseProxyMissAction: "TREAT_AS_EMPTY", AllocationPolicy: "BALANCED",
+		UpdatedAtNs: time.Now().UnixNano(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "latency_filters") {
+		t.Fatalf("expected invalid latency filter error, got %v", err)
+	}
+}
+
 func TestStateRepo_Platforms_CRUD(t *testing.T) {
 	repo := newTestStateRepo(t)
 	now := time.Now().UnixNano()

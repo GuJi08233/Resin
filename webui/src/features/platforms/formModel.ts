@@ -5,6 +5,7 @@ import type {
   Platform,
   PlatformCreateInput,
   PlatformIPInfoFilters,
+  PlatformLatencyFilters,
   PlatformStatusCodeAction,
   PlatformUpdateInput,
 } from "./types";
@@ -42,6 +43,20 @@ export function parseScoreField(input: string | undefined): ParsedScore {
   }
   const value = Number(trimmed);
   if (!Number.isInteger(value) || value < 0 || value > 100) {
+    return { value: null, invalid: true };
+  }
+  return { value, invalid: false };
+}
+
+// parseLatencyField parses an optional non-negative integer latency in ms.
+// An empty string means "no bound".
+export function parseLatencyField(input: string | undefined): ParsedScore {
+  const trimmed = (input ?? "").trim();
+  if (!trimmed) {
+    return { value: null, invalid: false };
+  }
+  const value = Number(trimmed);
+  if (!Number.isInteger(value) || value < 0) {
     return { value: null, invalid: true };
   }
   return { value, invalid: false };
@@ -94,11 +109,14 @@ export const platformFormSchema = z.object({
   sticky_ttl: z.string().optional(),
   regex_filters_text: z.string().optional(),
   region_filters_text: z.string().optional(),
+  continent_filters: z.array(z.string()),
   ipinfo_min_fraud_score: z.string().optional(),
   ipinfo_max_fraud_score: z.string().optional(),
   ipinfo_ip_type: z.enum(["any", "residential", "hosting"]),
   ipinfo_native: z.enum(["any", "native", "broadcast"]),
   ipinfo_asns_text: z.string().optional(),
+  latency_min_ms: z.string().optional(),
+  latency_max_ms: z.string().optional(),
   reverse_proxy_miss_action: z.enum(missActions),
   reverse_proxy_empty_account_behavior: z.enum(emptyAccountBehaviors),
   reverse_proxy_fixed_account_header: z.string().optional(),
@@ -207,6 +225,32 @@ export const platformFormSchema = z.object({
       });
     }
   });
+
+  const minLatency = parseLatencyField(value.latency_min_ms);
+  const maxLatency = parseLatencyField(value.latency_max_ms);
+  if (minLatency.invalid) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["latency_min_ms"],
+      message: "延迟必须是非负整数（单位 ms）",
+    });
+  }
+  if (maxLatency.invalid) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["latency_max_ms"],
+      message: "延迟必须是非负整数（单位 ms）",
+    });
+  }
+  if (!minLatency.invalid && !maxLatency.invalid && minLatency.value !== null && maxLatency.value !== null) {
+    if (minLatency.value > maxLatency.value) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["latency_max_ms"],
+        message: "最小延迟不能大于最大延迟",
+      });
+    }
+  }
 });
 
 export type PlatformFormValues = z.infer<typeof platformFormSchema>;
@@ -216,11 +260,14 @@ export const defaultPlatformFormValues: PlatformFormValues = {
   sticky_ttl: "",
   regex_filters_text: "",
   region_filters_text: "",
+  continent_filters: [],
   ipinfo_min_fraud_score: "",
   ipinfo_max_fraud_score: "",
   ipinfo_ip_type: "any",
   ipinfo_native: "any",
   ipinfo_asns_text: "",
+  latency_min_ms: "",
+  latency_max_ms: "",
   reverse_proxy_miss_action: "TREAT_AS_EMPTY",
   reverse_proxy_empty_account_behavior: "RANDOM",
   reverse_proxy_fixed_account_header: "Authorization",
@@ -228,6 +275,26 @@ export const defaultPlatformFormValues: PlatformFormValues = {
   passive_circuit_breaker_disabled: false,
   status_code_rules: [],
 };
+
+// formatLatencyFilterSummary returns a short human-readable summary for
+// platform cards (e.g. "<= 300ms", "50~300ms", ">= 50ms", or fallback).
+export function formatLatencyFilterSummary(
+  filters: PlatformLatencyFilters | undefined,
+  fallback: string,
+): string {
+  const min = filters?.min_ms ?? null;
+  const max = filters?.max_ms ?? null;
+  if (min === null && max === null) {
+    return fallback;
+  }
+  if (min !== null && max !== null) {
+    return `${min}~${max}ms`;
+  }
+  if (max !== null) {
+    return `≤ ${max}ms`;
+  }
+  return `≥ ${min}ms`;
+}
 
 // countIPInfoFilterConditions counts the active constraints in an IP profile
 // filter, used for the platform list card badge.
@@ -254,13 +321,16 @@ export function countIPInfoFilterConditions(filters: PlatformIPInfoFilters | und
 
 export function platformToFormValues(platform: Platform): PlatformFormValues {  const regexFilters = Array.isArray(platform.regex_filters) ? platform.regex_filters : [];
   const regionFilters = Array.isArray(platform.region_filters) ? platform.region_filters : [];
+  const continentFilters = Array.isArray(platform.continent_filters) ? platform.continent_filters : [];
   const ipInfoFilters = platform.ipinfo_filters;
+  const latencyFilters = platform.latency_filters;
 
   return {
     name: platform.name,
     sticky_ttl: platform.sticky_ttl,
     regex_filters_text: regexFilters.join("\n"),
     region_filters_text: regionFilters.join("\n"),
+    continent_filters: continentFilters,
     ipinfo_min_fraud_score:
       ipInfoFilters?.min_fraud_score === null || ipInfoFilters?.min_fraud_score === undefined
         ? ""
@@ -272,6 +342,14 @@ export function platformToFormValues(platform: Platform): PlatformFormValues {  
     ipinfo_ip_type: ipInfoFilters?.ip_type ?? "any",
     ipinfo_native: ipInfoFilters?.native ?? "any",
     ipinfo_asns_text: (ipInfoFilters?.asns ?? []).join("\n"),
+    latency_min_ms:
+      latencyFilters?.min_ms === null || latencyFilters?.min_ms === undefined
+        ? ""
+        : String(latencyFilters.min_ms),
+    latency_max_ms:
+      latencyFilters?.max_ms === null || latencyFilters?.max_ms === undefined
+        ? ""
+        : String(latencyFilters.max_ms),
     reverse_proxy_miss_action: platform.reverse_proxy_miss_action,
     reverse_proxy_empty_account_behavior: platform.reverse_proxy_empty_account_behavior,
     reverse_proxy_fixed_account_header: platform.reverse_proxy_fixed_account_header,
@@ -299,12 +377,21 @@ function toIPInfoFiltersPayload(values: PlatformFormValues): PlatformIPInfoFilte
   };
 }
 
+function toLatencyFiltersPayload(values: PlatformFormValues): PlatformLatencyFilters {
+  return {
+    min_ms: parseLatencyField(values.latency_min_ms).value,
+    max_ms: parseLatencyField(values.latency_max_ms).value,
+  };
+}
+
 function toPlatformPayloadBase(values: PlatformFormValues) {
   return {
     name: values.name.trim(),
     regex_filters: parseLinesToList(values.regex_filters_text),
     region_filters: parseLinesToList(values.region_filters_text, (value) => value.toLowerCase()),
+    continent_filters: values.continent_filters ?? [],
     ipinfo_filters: toIPInfoFiltersPayload(values),
+    latency_filters: toLatencyFiltersPayload(values),
     reverse_proxy_miss_action: values.reverse_proxy_miss_action,
     reverse_proxy_empty_account_behavior: values.reverse_proxy_empty_account_behavior,
     reverse_proxy_fixed_account_header: parseHeaderLines(values.reverse_proxy_fixed_account_header).join("\n"),

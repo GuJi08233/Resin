@@ -27,15 +27,18 @@ import {
   missActions,
 } from "./constants";
 import {
+  countIPInfoFilterConditions,
   defaultPlatformFormValues,
+  formatLatencyFilterSummary,
   platformFormSchema,
   platformNameRuleHint,
   toPlatformCreateInput,
   type PlatformFormValues,
 } from "./formModel";
-import { countIPInfoFilterConditions } from "./formModel";
 import type { Platform } from "./types";
+import { ContinentFilterEditor } from "./ContinentFilterEditor";
 import { IPInfoFilterEditor } from "./IPInfoFilterEditor";
+import { LatencyFilterEditor } from "./LatencyFilterEditor";
 import { StatusCodeRuleEditor } from "./StatusCodeRuleEditor";
 import { allowsWarpSubscription, setWarpSubscriptionAllowed } from "./warpSubscription";
 
@@ -180,8 +183,10 @@ export function PlatformPage() {
         <div className="platform-card-grid">
           {platforms.map((platform) => {
             const regionCount = platform.region_filters.length;
+            const continentCount = platform.continent_filters.length;
             const regexCount = platform.regex_filters.length;
             const ipInfoCount = countIPInfoFilterConditions(platform.ipinfo_filters);
+            const latencySummary = formatLatencyFilterSummary(platform.latency_filters, t("不限"));
             const stickyTTL = formatGoDuration(platform.sticky_ttl, t("默认"));
 
             return (
@@ -199,6 +204,10 @@ export function PlatformPage() {
                 </div>
                 <div className="platform-tile-facts">
                   <span className="platform-fact">
+                    <span>{t("大区")}</span>
+                    <strong>{continentCount}</strong>
+                  </span>
+                  <span className="platform-fact">
                     <span>{t("区域")}</span>
                     <strong>{regionCount}</strong>
                   </span>
@@ -209,6 +218,10 @@ export function PlatformPage() {
                   <span className="platform-fact">
                     <span>{t("IP 画像")}</span>
                     <strong>{ipInfoCount}</strong>
+                  </span>
+                  <span className="platform-fact">
+                    <span>{t("延迟")}</span>
+                    <strong>{latencySummary}</strong>
                   </span>
                   <span className="platform-fact">
                     <span>{t("租约时长")}</span>
@@ -381,6 +394,8 @@ export function PlatformPage() {
                 <p className="muted">{t("关闭后，此平台排除 WARP 订阅的全部节点，其他平台不受影响。")}</p>
               </div>
 
+              <ContinentFilterEditor form={createForm} idPrefix="create" />
+
               <div className="field-group">
                 <label className="field-label" htmlFor="create-region">
                   {t("地区过滤规则（可选）")}
@@ -395,6 +410,8 @@ export function PlatformPage() {
                   {t("支持反选：以 ! 开头可排除地区（如 !hk）。可与正选混用，最终结果为“先正选再排除”。")}
                 </p>
               </div>
+
+              <LatencyFilterEditor form={createForm} idPrefix="create" />
 
               <IPInfoFilterEditor form={createForm} idPrefix="create" />
 

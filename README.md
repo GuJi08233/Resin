@@ -37,7 +37,7 @@ It helps shield your services from unstable underlying proxy nodes by aggregatin
 - **Persistent state**: Keeps node health, latency stats, and lease bindings across restarts.
 - **Zero-intrusion sticky access**: Can extract account identity from existing request headers (for example API keys), so clients often need no code changes.
 - **Incremental subscription refresh**: Syncs subscription updates without interrupting current connections.
-- **Flexible node isolation**: Use Platform rules (regex, region, etc.) to build independent proxy pools for different business scenarios.
+- **Flexible node isolation**: Use Platform rules (regex, continent, region, reference latency, IP profile, and status-code rules) to build independent proxy pools for different business scenarios.
 
 > [!TIP]
 > You can feed this README and [`DESIGN.md`](DESIGN.md) to AI and ask it anything about the project.

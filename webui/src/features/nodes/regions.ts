@@ -11,9 +11,48 @@ export interface RegionOption {
     name: string;
 }
 
+export type ContinentCode = "as" | "eu" | "na" | "sa" | "oc" | "af" | "an";
+
+export interface ContinentOption {
+    code: ContinentCode;
+    label: string;
+}
+
+const CONTINENT_LABELS: Record<ContinentCode, { zh: string; en: string }> = {
+    as: { zh: "亚洲", en: "Asia" },
+    eu: { zh: "欧洲", en: "Europe" },
+    na: { zh: "北美洲", en: "North America" },
+    sa: { zh: "南美洲", en: "South America" },
+    oc: { zh: "大洋洲", en: "Oceania" },
+    af: { zh: "非洲", en: "Africa" },
+    an: { zh: "南极洲", en: "Antarctica" },
+};
+
+export const CONTINENT_CODES: readonly ContinentCode[] = [
+    "as",
+    "eu",
+    "na",
+    "sa",
+    "oc",
+    "af",
+    "an",
+];
+
 function getCountryLocale(): "zh" | "en" {
     return isEnglishLocale(getCurrentLocale()) ? "en" : "zh";
 }
+
+export const getAllContinents = (): ContinentOption[] => {
+    const locale = getCountryLocale();
+    return CONTINENT_CODES.map((code) => ({
+        code,
+        label: CONTINENT_LABELS[code][locale],
+    }));
+};
+
+export const getContinentLabel = (code: ContinentCode): string => {
+    return CONTINENT_LABELS[code][getCountryLocale()];
+};
 
 export const getAllRegions = (): RegionOption[] => {
     const names = countries.getNames(getCountryLocale(), { select: "official" });

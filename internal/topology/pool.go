@@ -624,16 +624,29 @@ func (p *GlobalNodePool) platformExcluder(platformID string, now time.Time) plat
 	}
 }
 
-// notifyAllPlatformsDirty tells every registered platform to re-evaluate a node.
-func (p *GlobalNodePool) notifyAllPlatformsDirty(hash node.Hash) {
-	// A parent's health, subscription and tag changes also affect its children.
-	children := p.derivedHashes(hash)
-	defer func() {
-		for _, child := range children {
-			p.notifyAllPlatformsDirty(child)
-		}
-	}()
-	platforms := p.platformSnapshot()
+func (p *GlobalNodePool) currentLatencyAuthorities() []string {
+	if p.latencyAuthorities == nil {
+		return nil
+	}
+	return p.latencyAuthorities()
+}
+
+// ReferenceLatencyMs computes a node's reference latency (average EWMA across
+// configured authority domains, in milliseconds).
+func (p *GlobalNodePool) ReferenceLatencyMs(entry *node.NodeEntry) (float64, bool) {
+	return node.AverageEWMAForDomainsMs(entry, p.currentLatencyAuthorities())
+}
+
+func (p *GlobalNodePool) evalOptions(platformID string, now time.Time, authorities []string) platform.EvalOptions {
+	return platform.EvalOptions{
+		Excluder: p.platformExcluder(platformID, now),
+		LatencyLookup: func(entry *node.NodeEntry) (float64, bool) {
+			return node.AverageEWMAForDomainsMs(entry, authorities)
+		},
+	}
+}
+
+func (p *GlobalNodePool) notifyPlatformsDirty(hash node.Hash, platforms []*platform.Platform) {
 	if len(platforms) == 0 {
 		return
 	}
@@ -643,6 +656,7 @@ func (p *GlobalNodePool) notifyAllPlatformsDirty(hash node.Hash) {
 		return p.nodes.Load(h)
 	}
 	now := time.Now()
+	authorities := p.currentLatencyAuthorities()
 
 	workers := runtime.GOMAXPROCS(0)
 	if workers < 1 {
@@ -660,15 +674,44 @@ func (p *GlobalNodePool) notifyAllPlatformsDirty(hash node.Hash) {
 		go func(plat *platform.Platform) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			plat.NotifyDirtyExcluding(hash, getEntry, subLookup, p.geoLookup, p.platformExcluder(plat.ID, now))
+			plat.NotifyDirtyWithOptions(hash, getEntry, subLookup, p.geoLookup, p.evalOptions(plat.ID, now, authorities))
 		}(plat)
 	}
 	wg.Wait()
 }
 
-// RebuildAllPlatforms triggers a full rebuild on all registered platforms.
-func (p *GlobalNodePool) RebuildAllPlatforms() {
+// notifyAllPlatformsDirty tells every registered platform to re-evaluate a node.
+func (p *GlobalNodePool) notifyAllPlatformsDirty(hash node.Hash) {
+	// A parent's health, subscription and tag changes also affect its children.
+	children := p.derivedHashes(hash)
+	defer func() {
+		for _, child := range children {
+			p.notifyAllPlatformsDirty(child)
+		}
+	}()
+	p.notifyPlatformsDirty(hash, p.platformSnapshot())
+}
+
+// notifyLatencyFilteredPlatformsDirty re-evaluates a node only on platforms
+// that have an active LatencyFilters constraint.
+func (p *GlobalNodePool) notifyLatencyFilteredPlatformsDirty(hash node.Hash) {
 	platforms := p.platformSnapshot()
+	if len(platforms) == 0 {
+		return
+	}
+	var filtered []*platform.Platform
+	for _, plat := range platforms {
+		if plat.LatencyFilters.Active() {
+			filtered = append(filtered, plat)
+		}
+	}
+	if len(filtered) == 0 {
+		return
+	}
+	p.notifyPlatformsDirty(hash, filtered)
+}
+
+func (p *GlobalNodePool) rebuildPlatforms(platforms []*platform.Platform) {
 	if len(platforms) == 0 {
 		return
 	}
@@ -677,6 +720,7 @@ func (p *GlobalNodePool) RebuildAllPlatforms() {
 	poolRange := func(fn func(node.Hash, *node.NodeEntry) bool) {
 		p.nodes.Range(fn)
 	}
+	authorities := p.currentLatencyAuthorities()
 
 	workers := runtime.GOMAXPROCS(0)
 	if workers < 1 {
@@ -695,10 +739,28 @@ func (p *GlobalNodePool) RebuildAllPlatforms() {
 		go func(plat *platform.Platform) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			plat.FullRebuildExcluding(poolRange, subLookup, p.geoLookup, p.platformExcluder(plat.ID, now))
+			plat.FullRebuildWithOptions(poolRange, subLookup, p.geoLookup, p.evalOptions(plat.ID, now, authorities))
 		}(plat)
 	}
 	wg.Wait()
+}
+
+// RebuildAllPlatforms triggers a full rebuild on all registered platforms.
+func (p *GlobalNodePool) RebuildAllPlatforms() {
+	p.rebuildPlatforms(p.platformSnapshot())
+}
+
+// RebuildLatencyFilteredPlatforms triggers a full rebuild only on platforms
+// with an active LatencyFilters constraint (e.g. when LatencyAuthorities changes).
+func (p *GlobalNodePool) RebuildLatencyFilteredPlatforms() {
+	platforms := p.platformSnapshot()
+	var filtered []*platform.Platform
+	for _, plat := range platforms {
+		if plat.LatencyFilters.Active() {
+			filtered = append(filtered, plat)
+		}
+	}
+	p.rebuildPlatforms(filtered)
 }
 
 // RebuildPlatform triggers a full rebuild on a specific platform.
@@ -707,7 +769,8 @@ func (p *GlobalNodePool) RebuildPlatform(plat *platform.Platform) {
 	poolRange := func(fn func(node.Hash, *node.NodeEntry) bool) {
 		p.nodes.Range(fn)
 	}
-	plat.FullRebuildExcluding(poolRange, subLookup, p.geoLookup, p.platformExcluder(plat.ID, time.Now()))
+	authorities := p.currentLatencyAuthorities()
+	plat.FullRebuildWithOptions(poolRange, subLookup, p.geoLookup, p.evalOptions(plat.ID, time.Now(), authorities))
 }
 
 // --- Health Management ---
@@ -900,9 +963,13 @@ func (p *GlobalNodePool) RecordLatency(hash node.Hash, rawTarget string, latency
 	wasEmpty, evictedDomain, evicted := entry.LatencyTable.UpdateClassified(domain, *latency, decayWindow, isAuthority)
 
 	// If the table transitioned from empty to non-empty, the node might
-	// now satisfy the HasLatency filter — notify platforms.
+	// now satisfy the HasLatency filter — notify all platforms.
+	// Otherwise, if an authority domain was updated, platforms with an active
+	// latency filter may change membership.
 	if wasEmpty {
 		p.notifyAllPlatformsDirty(hash)
+	} else if isAuthority {
+		p.notifyLatencyFilteredPlatformsDirty(hash)
 	}
 
 	if entry.ParentHash == nil && p.onNodeLatencyChanged != nil {

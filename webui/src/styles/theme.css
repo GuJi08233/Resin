@@ -1826,6 +1826,56 @@ a {
   background: rgba(255, 255, 255, 0.6);
 }
 
+.continent-filter-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.continent-filter-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.continent-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color 140ms ease, background-color 140ms ease, color 140ms ease;
+}
+
+.continent-pill small {
+  font-size: 11px;
+  opacity: 0.72;
+  font-weight: 600;
+}
+
+.continent-pill:hover {
+  border-color: var(--accent, #2563eb);
+}
+
+.continent-pill-include {
+  border-color: var(--success, #16a34a);
+  background: rgba(22, 163, 74, 0.12);
+  color: var(--success, #15803d);
+}
+
+.continent-pill-exclude {
+  border-color: var(--danger, #dc2626);
+  background: rgba(220, 38, 38, 0.12);
+  color: var(--danger, #b91c1c);
+}
+
 .status-code-rule-list {
   display: flex;
   flex-direction: column;

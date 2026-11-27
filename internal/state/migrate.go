@@ -29,10 +29,11 @@ const (
 	stateVersionAddEndpointEnabled               = 8
 	stateVersionPlatformRegexFilterRules         = 9
 	stateVersionAddPlatformStatusCodeRules       = 10
-	stateVersionAddPlatformEgressExclusions      = 11
-	stateVersionAddPlatformIPInfoFilters         = 12
-	stateLatestVersion                           = stateVersionAddPlatformIPInfoFilters
-	stateLegacyBaselineVersion                   = stateVersionAddFixedAccountHeader
+	stateVersionAddPlatformEgressExclusions           = 11
+	stateVersionAddPlatformIPInfoFilters              = 12
+	stateVersionAddPlatformContinentAndLatencyFilters = 13
+	stateLatestVersion                                = stateVersionAddPlatformContinentAndLatencyFilters
+	stateLegacyBaselineVersion                        = stateVersionAddFixedAccountHeader
 
 	stateBaseSchemaMigration = stateMigrationsPath + "/000001_state_base.up.sql"
 )

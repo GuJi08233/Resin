@@ -6,6 +6,7 @@ import type {
   PlatformCreateInput,
   PlatformExclusion,
   PlatformIPInfoFilters,
+  PlatformLatencyFilters,
   PlatformLease,
   PlatformStatusCodeRule,
   PlatformUpdateInput,
@@ -13,10 +14,15 @@ import type {
 
 const basePath = "/api/v1/platforms";
 
-type ApiPlatform = Omit<Platform, "regex_filters" | "region_filters" | "ipinfo_filters" | "status_code_rules"> & {
+type ApiPlatform = Omit<
+  Platform,
+  "regex_filters" | "region_filters" | "continent_filters" | "ipinfo_filters" | "latency_filters" | "status_code_rules"
+> & {
   regex_filters?: string[] | null;
   region_filters?: string[] | null;
+  continent_filters?: string[] | null;
   ipinfo_filters?: Partial<PlatformIPInfoFilters> | null;
+  latency_filters?: Partial<PlatformLatencyFilters> | null;
   routable_node_count?: number | null;
   reverse_proxy_miss_action?: Platform["reverse_proxy_miss_action"] | null;
   reverse_proxy_empty_account_behavior?: Platform["reverse_proxy_empty_account_behavior"] | null;
@@ -89,13 +95,36 @@ export function normalizeIPInfoFilters(
   };
 }
 
+export function normalizeLatencyFilters(
+  raw: Partial<PlatformLatencyFilters> | null | undefined,
+): PlatformLatencyFilters {
+  const toMs = (value: unknown): number | null => {
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      return null;
+    }
+    const rounded = Math.trunc(value);
+    if (rounded < 0) {
+      return null;
+    }
+    return rounded;
+  };
+  return {
+    min_ms: toMs(raw?.min_ms),
+    max_ms: toMs(raw?.max_ms),
+  };
+}
+
 function normalizePlatform(raw: ApiPlatform): Platform {
   return {
     ...raw,
     reverse_proxy_miss_action: parseMissAction(raw.reverse_proxy_miss_action),
     regex_filters: Array.isArray(raw.regex_filters) ? raw.regex_filters : [],
     region_filters: Array.isArray(raw.region_filters) ? raw.region_filters : [],
+    continent_filters: Array.isArray(raw.continent_filters)
+      ? raw.continent_filters.filter((item): item is string => typeof item === "string")
+      : [],
     ipinfo_filters: normalizeIPInfoFilters(raw.ipinfo_filters),
+    latency_filters: normalizeLatencyFilters(raw.latency_filters),
     routable_node_count: typeof raw.routable_node_count === "number" ? raw.routable_node_count : 0,
     status_code_rules: normalizeStatusCodeRules(raw.status_code_rules),
     reverse_proxy_empty_account_behavior:

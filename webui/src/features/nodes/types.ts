@@ -62,7 +62,7 @@ export type PageResponse<T> = {
   unique_healthy_egress_ips: number;
 };
 
-export type NodeSortBy = "tag" | "created_at" | "failure_count" | "region" | "fraud_score";
+export type NodeSortBy = "tag" | "created_at" | "failure_count" | "region" | "fraud_score" | "latency";
 export type SortOrder = "asc" | "desc";
 
 export type NodeIPTypeFilter = "any" | "residential" | "hosting";
@@ -73,6 +73,7 @@ export type NodeListFilters = {
   platform_id?: string;
   subscription_id?: string;
   tag_keyword?: string;
+  continent?: string;
   region?: string;
   egress_ip?: string;
   probed_since?: string;
@@ -85,6 +86,9 @@ export type NodeListFilters = {
   native?: NodeNativeFilter;
   asn?: string;
   has_ipinfo?: boolean;
+  min_latency_ms?: number;
+  max_latency_ms?: number;
+  has_latency?: boolean;
 };
 
 export type NodeListQuery = NodeListFilters & {

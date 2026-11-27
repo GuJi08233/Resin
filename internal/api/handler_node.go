@@ -49,6 +49,10 @@ func compareNodeSummaries(sortBy string, a, b service.NodeSummary) int {
 		if a.IPInfo != nil && b.IPInfo != nil {
 			order = cmp.Compare(a.IPInfo.FraudScore, b.IPInfo.FraudScore)
 		}
+	case "latency":
+		if a.ReferenceLatencyMs != nil && b.ReferenceLatencyMs != nil {
+			order = cmp.Compare(*a.ReferenceLatencyMs, *b.ReferenceLatencyMs)
+		}
 	default:
 		order = strings.Compare(nodeTagSortKey(a), nodeTagSortKey(b))
 	}
@@ -60,10 +64,19 @@ func compareNodeSummaries(sortBy string, a, b service.NodeSummary) int {
 
 func sortNodeSummaries(nodes []service.NodeSummary, sorting Sorting) {
 	slices.SortStableFunc(nodes, func(a, b service.NodeSummary) int {
-		// Nodes without an IP profile always sort last, in both directions,
-		// so they do not crowd out scored nodes.
+		// Nodes without an IP profile or reference latency always sort last,
+		// in both directions, so they do not crowd out measured nodes.
 		if sorting.SortBy == "fraud_score" {
 			aHas, bHas := a.IPInfo != nil, b.IPInfo != nil
+			if aHas != bHas {
+				if aHas {
+					return -1
+				}
+				return 1
+			}
+		}
+		if sorting.SortBy == "latency" {
+			aHas, bHas := a.ReferenceLatencyMs != nil, b.ReferenceLatencyMs != nil
 			if aHas != bHas {
 				if aHas {
 					return -1
@@ -128,6 +141,82 @@ func parseOptionalIntQuery(
 		return nil, false
 	}
 	return &value, true
+}
+
+// parseOptionalNonNegativeIntQuery parses an optional integer query parameter >= 0.
+// Returns nil when the parameter is absent.
+func parseOptionalNonNegativeIntQuery(
+	w http.ResponseWriter,
+	r *http.Request,
+	key string,
+) (*int, bool) {
+	raw := strings.TrimSpace(r.URL.Query().Get(key))
+	if raw == "" {
+		return nil, true
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 0 {
+		writeInvalidArgument(w, fmt.Sprintf("%s: must be a non-negative integer", key))
+		return nil, false
+	}
+	return &value, true
+}
+
+// parseContinentFilterQuery parses `continent` query parameters (comma-separated
+// and/or repeated, supporting optional leading "!" negation).
+func parseContinentFilterQuery(w http.ResponseWriter, r *http.Request) ([]string, bool) {
+	var rawEntries []string
+	for _, raw := range r.URL.Query()["continent"] {
+		for _, entry := range strings.Split(raw, ",") {
+			entry = strings.TrimSpace(entry)
+			if entry == "" {
+				continue
+			}
+			rawEntries = append(rawEntries, entry)
+		}
+	}
+	if len(rawEntries) == 0 {
+		return nil, true
+	}
+	out := make([]string, 0, len(rawEntries))
+	seen := make(map[string]bool, len(rawEntries))
+	for _, entry := range rawEntries {
+		code, exclude, err := platform.ParseContinentFilterEntry(entry)
+		if err != nil {
+			writeInvalidArgument(w, "continent: "+err.Error())
+			return nil, false
+		}
+		canonical := code
+		if exclude {
+			canonical = "!" + code
+		}
+		if seen[canonical] {
+			continue
+		}
+		seen[canonical] = true
+		out = append(out, canonical)
+	}
+	return out, true
+}
+
+// parseLatencyFilterQuery builds a latency filter from node list query parameters.
+func parseLatencyFilterQuery(w http.ResponseWriter, r *http.Request) (platform.LatencyFilter, bool) {
+	minMs, ok := parseOptionalNonNegativeIntQuery(w, r, "min_latency_ms")
+	if !ok {
+		return platform.LatencyFilter{}, false
+	}
+	maxMs, ok := parseOptionalNonNegativeIntQuery(w, r, "max_latency_ms")
+	if !ok {
+		return platform.LatencyFilter{}, false
+	}
+	if minMs != nil && maxMs != nil && *minMs > *maxMs {
+		writeInvalidArgument(w, "min_latency_ms: must be <= max_latency_ms")
+		return platform.LatencyFilter{}, false
+	}
+	return platform.LatencyFilter{
+		MinMs: minMs,
+		MaxMs: maxMs,
+	}, true
 }
 
 // parseIPInfoFilterQuery builds an IP profile filter from node list query
@@ -219,6 +308,11 @@ func HandleListNodes(cp *service.ControlPlaneService) http.HandlerFunc {
 		if v := q.Get("region"); v != "" {
 			filters.Region = &v
 		}
+		continentFilters, ok := parseContinentFilterQuery(w, r)
+		if !ok {
+			return
+		}
+		filters.ContinentFilters = continentFilters
 		if v := q.Get("egress_ip"); v != "" {
 			filters.EgressIP = &v
 		}
@@ -265,13 +359,25 @@ func HandleListNodes(cp *service.ControlPlaneService) http.HandlerFunc {
 		}
 		filters.HasIPInfo = hasIPInfo
 
+		latencyFilters, ok := parseLatencyFilterQuery(w, r)
+		if !ok {
+			return
+		}
+		filters.LatencyFilters = latencyFilters
+
+		hasLatency, ok := parseBoolQueryOrWriteInvalid(w, r, "has_latency")
+		if !ok {
+			return
+		}
+		filters.HasLatency = hasLatency
+
 		nodes, err := cp.ListNodes(filters)
 		if err != nil {
 			writeServiceError(w, err)
 			return
 		}
 
-		sorting, ok := parseSortingOrWriteInvalid(w, r, []string{"tag", "created_at", "failure_count", "region", "fraud_score"}, "tag", "asc")
+		sorting, ok := parseSortingOrWriteInvalid(w, r, []string{"tag", "created_at", "failure_count", "region", "fraud_score", "latency"}, "tag", "asc")
 		if !ok {
 			return
 		}

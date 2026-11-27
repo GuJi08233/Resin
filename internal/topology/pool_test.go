@@ -1008,3 +1008,70 @@ func TestPool_UpdateNodeIPInfo_ReevaluatesPlatforms(t *testing.T) {
 		t.Fatal("node should stay routable after a repeated identical probe")
 	}
 }
+
+func TestPool_RecordLatency_ReevaluatesLatencyFilteredPlatforms(t *testing.T) {
+	subMgr := NewSubscriptionManager()
+	sub := subscription.NewSubscription("s1", "Sub1", "url", true, false)
+	subMgr.Register(sub)
+
+	authorities := []string{"gstatic.com"}
+	pool := NewGlobalNodePool(PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              func(netip.Addr) string { return "us" },
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return time.Millisecond },
+		LatencyAuthorities:     func() []string { return authorities },
+	})
+
+	plat := platform.NewPlatform("p-lat", "FastOnly", nil, nil)
+	maxMs := 150
+	plat.LatencyFilters = platform.LatencyFilter{MaxMs: &maxMs}
+	pool.RegisterPlatform(plat)
+
+	raw := json.RawMessage(`{"type":"ss","server":"1.1.1.1"}`)
+	h := node.HashFromRawOptions(raw)
+
+	mn := subscription.NewManagedNodes()
+	mn.StoreNode(h, subscription.ManagedNode{Tags: []string{"us-node"}})
+	sub.SwapManagedNodes(mn)
+
+	pool.AddNodeFromSub(h, raw, "s1")
+	entry, ok := pool.GetEntry(h)
+	if !ok {
+		t.Fatal("entry not found")
+	}
+	ob := testutil.NewNoopOutbound()
+	entry.Outbound.Store(&ob)
+	entry.SetEgressIP(netip.MustParseAddr("1.2.3.4"))
+	pool.RecordResult(h, true)
+
+	// Non-authority latency makes HasLatency=true, but no reference latency yet.
+	otherLat := 50 * time.Millisecond
+	pool.RecordLatency(h, "example.com", &otherLat)
+	if plat.View().Contains(h) {
+		t.Fatal("node without authority reference latency should not match active latency filter")
+	}
+
+	// Authority latency within maxMs makes node routable.
+	fastLat := 80 * time.Millisecond
+	pool.RecordLatency(h, "gstatic.com", &fastLat)
+	if !plat.View().Contains(h) {
+		t.Fatal("node within max latency should become routable")
+	}
+
+	// Authority latency exceeding maxMs removes node from platform view.
+	time.Sleep(10 * time.Millisecond)
+	slowLat := 400 * time.Millisecond
+	pool.RecordLatency(h, "gstatic.com", &slowLat)
+	if plat.View().Contains(h) {
+		t.Fatal("node exceeding max latency should be removed from platform view")
+	}
+
+	// Switching authorities to include example.com (50ms) and rebuilding re-adds the node.
+	authorities = []string{"example.com"}
+	pool.RebuildLatencyFilteredPlatforms()
+	if !plat.View().Contains(h) {
+		t.Fatal("rebuilding after authority change should restore routability")
+	}
+}

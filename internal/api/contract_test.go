@@ -63,6 +63,12 @@ func newControlPlaneTestServerWithBodyLimit(
 		MaxLatencyTableEntries: 32,
 		MaxConsecutiveFailures: func() int { return 3 },
 		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+		LatencyAuthorities: func() []string {
+			if cfg := runtimeCfg.Load(); cfg != nil {
+				return cfg.LatencyAuthorities
+			}
+			return nil
+		},
 	})
 	router := routing.NewRouter(routing.RouterConfig{
 		Pool:        pool,
@@ -2176,5 +2182,117 @@ func TestAPIContract_PlatformIPInfoFilters_Invalid(t *testing.T) {
 				t.Fatalf("body %q should mention %q", rec.Body.String(), tc.hint)
 			}
 		})
+	}
+}
+
+func TestAPIContract_PlatformContinentAndLatencyFilters(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	sub := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
+	cp.SubMgr.Register(sub)
+
+	addRoutable := func(server, region string, latMs int) node.Hash {
+		raw := []byte(`{"type":"ss","server":"` + server + `","port":443}`)
+		h := node.HashFromRawOptions(raw)
+		cp.Pool.AddNodeFromSub(h, raw, sub.ID)
+		sub.ManagedNodes().StoreNode(h, subscription.ManagedNode{Tags: []string{"node-" + region}})
+		entry, _ := cp.Pool.GetEntry(h)
+		ob := testutil.NewNoopOutbound()
+		entry.Outbound.Store(&ob)
+		entry.SetEgressIP(netip.MustParseAddr(server))
+		entry.SetEgressRegion(region)
+		cp.Pool.RecordResult(h, true)
+		entry.LatencyTable.LoadEntry("gstatic.com", node.DomainLatencyStats{
+			Ewma:        time.Duration(latMs) * time.Millisecond,
+			LastUpdated: time.Now(),
+		})
+		return h
+	}
+
+	hDE := addRoutable("1.1.1.1", "de", 120)
+	hFR := addRoutable("2.2.2.2", "fr", 450)
+	_ = addRoutable("3.3.3.3", "jp", 80)
+
+	rec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/platforms", map[string]any{
+		"name":              "EuroFast",
+		"continent_filters": []string{"EU"},
+		"latency_filters": map[string]any{
+			"min_ms": 50,
+			"max_ms": 200,
+		},
+	}, true)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create platform status: got %d, want %d, body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	body := decodeJSONMap(t, rec)
+	conts, ok := body["continent_filters"].([]any)
+	if !ok || len(conts) != 1 || conts[0] != "eu" {
+		t.Fatalf("continent_filters: got %+v", body["continent_filters"])
+	}
+	latFilters, ok := body["latency_filters"].(map[string]any)
+	if !ok || latFilters["min_ms"] != float64(50) || latFilters["max_ms"] != float64(200) {
+		t.Fatalf("latency_filters: got %+v", body["latency_filters"])
+	}
+	if body["routable_node_count"] != float64(1) {
+		t.Fatalf("routable_node_count = %v, want 1", body["routable_node_count"])
+	}
+
+	platformID := body["id"].(string)
+	plat, ok := cp.Pool.GetPlatform(platformID)
+	if !ok || !plat.View().Contains(hDE) || plat.View().Contains(hFR) {
+		t.Fatalf("expected only hDE in view: containsDE=%v containsFR=%v", plat.View().Contains(hDE), plat.View().Contains(hFR))
+	}
+
+	// PATCH to widen latency ceiling and include Asia as well.
+	rec = doJSONRequest(t, srv, http.MethodPatch, "/api/v1/platforms/"+platformID, map[string]any{
+		"continent_filters": []string{"eu", "as"},
+		"latency_filters": map[string]any{
+			"max_ms": 500,
+		},
+	}, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch platform status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body = decodeJSONMap(t, rec)
+	latFilters = body["latency_filters"].(map[string]any)
+	if latFilters["min_ms"] != nil || latFilters["max_ms"] != float64(500) {
+		t.Fatalf("patched latency_filters: got %+v", latFilters)
+	}
+	if body["routable_node_count"] != float64(3) {
+		t.Fatalf("patched routable_node_count = %v, want 3", body["routable_node_count"])
+	}
+
+	// Changing latency_authorities via PATCH /system/config rebuilds latency-filtered platforms.
+	// Give hDE a fast sample on example.com and switch LatencyAuthorities to only example.com,
+	// so hFR and jp (only sampled on gstatic.com) drop out while hDE remains routable.
+	deEntry, _ := cp.Pool.GetEntry(hDE)
+	deEntry.LatencyTable.LoadEntry("example.com", node.DomainLatencyStats{
+		Ewma:        90 * time.Millisecond,
+		LastUpdated: time.Now(),
+	})
+	rec = doJSONRequest(t, srv, http.MethodPatch, "/api/v1/system/config", map[string]any{
+		"latency_test_url":    "https://example.com/generate_204",
+		"latency_authorities": []string{"example.com"},
+	}, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch system config status: got %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if !plat.View().Contains(hDE) || plat.View().Size() != 1 {
+		t.Fatalf("after authority switch, expected only hDE routable, size=%d containsDE=%v", plat.View().Size(), plat.View().Contains(hDE))
+	}
+
+	// Invalid continent/latency payloads rejected with 400.
+	invalidPayloads := []map[string]any{
+		{"name": "BadCont", "continent_filters": []string{"europe"}},
+		{"name": "BadLatNeg", "latency_filters": map[string]any{"max_ms": -1}},
+		{"name": "BadLatOrder", "latency_filters": map[string]any{"min_ms": 300, "max_ms": 100}},
+		{"name": "BadLatField", "latency_filters": map[string]any{"unknown": 1}},
+	}
+	for _, payload := range invalidPayloads {
+		rec = doJSONRequest(t, srv, http.MethodPost, "/api/v1/platforms", payload, true)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("payload %v status: got %d, want 400, body=%s", payload, rec.Code, rec.Body.String())
+		}
+		assertErrorCode(t, rec, "INVALID_ARGUMENT")
 	}
 }

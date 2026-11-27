@@ -879,6 +879,22 @@ Note: Once enabled, requests without authentication information are rejected ins
   "最小": "Min",
   "最大": "Max",
   "如 132203 / !4134": "e.g. 132203 / !4134",
+  "不限": "Any",
+  "清空": "Clear",
+  "大区": "Continent",
+  "大区过滤（可选）": "Continent filters (optional)",
+  "按洲际大区筛选节点出口。点击大区切换状态：未选 → 包含 → 排除；可与地区过滤组合使用（例如大区选欧洲、地区填 !ru）。":
+    "Filter exits by continent. Click a continent to cycle unset → include → exclude. Can be combined with region filters (e.g. Europe + !ru).",
+  "延迟": "Latency",
+  "延迟 (ms)": "Latency (ms)",
+  "延迟过滤": "Latency filter",
+  "延迟过滤（可选）": "Latency filters (optional)",
+  "依据节点在权威延迟域名的平均 EWMA 参考延迟（ms）筛选出口。启用任一条件后，尚无参考延迟的节点不会被此平台路由。":
+    "Filter exits by average EWMA reference latency (ms) across configured authority domains. Once any bound is set, nodes without a reference latency are not routed by this platform.",
+  "最小参考延迟 (ms)": "Minimum reference latency (ms)",
+  "最大参考延迟 (ms)": "Maximum reference latency (ms)",
+  "延迟必须是非负整数（单位 ms）": "Latency must be a non-negative integer (ms)",
+  "最小延迟不能大于最大延迟": "Minimum latency must not exceed the maximum",
 };
 
 export function translateDocumentTitle(locale: AppLocale): string {

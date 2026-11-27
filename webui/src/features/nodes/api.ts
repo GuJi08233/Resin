@@ -80,6 +80,7 @@ export async function listNodes(filters: NodeListQuery): Promise<PageResponse<No
   appendIfNotEmpty("platform_id", filters.platform_id);
   appendIfNotEmpty("subscription_id", filters.subscription_id);
   appendIfNotEmpty("tag_keyword", filters.tag_keyword);
+  appendIfNotEmpty("continent", filters.continent?.toLowerCase());
   appendIfNotEmpty("region", filters.region?.toLowerCase());
   appendIfNotEmpty("egress_ip", filters.egress_ip);
   appendIfNotEmpty("probed_since", filters.probed_since);
@@ -109,6 +110,15 @@ export async function listNodes(filters: NodeListQuery): Promise<PageResponse<No
   appendIfNotEmpty("asn", filters.asn);
   if (filters.has_ipinfo !== undefined) {
     query.set("has_ipinfo", String(filters.has_ipinfo));
+  }
+  if (filters.min_latency_ms !== undefined) {
+    query.set("min_latency_ms", String(filters.min_latency_ms));
+  }
+  if (filters.max_latency_ms !== undefined) {
+    query.set("max_latency_ms", String(filters.max_latency_ms));
+  }
+  if (filters.has_latency !== undefined) {
+    query.set("has_latency", String(filters.has_latency));
   }
 
   const data = await apiRequest<PageResponse<ApiNodeSummary>>(`${basePath}?${query.toString()}`);

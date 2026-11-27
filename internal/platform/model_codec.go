@@ -106,7 +106,15 @@ func BuildFromModel(mp model.Platform) (*Platform, error) {
 	if err := ValidateRegionFilters(mp.RegionFilters); err != nil {
 		return nil, err
 	}
+	continentFilters, err := NormalizeContinentFilters(mp.ContinentFilters)
+	if err != nil {
+		return nil, fmt.Errorf("decode platform %s %w", mp.ID, err)
+	}
 	ipInfoFilters, err := CompileIPInfoFilter(mp.IPInfoFilters)
+	if err != nil {
+		return nil, fmt.Errorf("decode platform %s %w", mp.ID, err)
+	}
+	latencyFilters, err := CompileLatencyFilter(mp.LatencyFilters)
 	if err != nil {
 		return nil, fmt.Errorf("decode platform %s %w", mp.ID, err)
 	}
@@ -151,7 +159,9 @@ func BuildFromModel(mp model.Platform) (*Platform, error) {
 		mp.AllocationPolicy,
 		mp.PassiveCircuitBreakerDisabled,
 	)
+	plat.ContinentFilters = continentFilters
 	plat.IPInfoFilters = ipInfoFilters
+	plat.LatencyFilters = latencyFilters
 	plat.StatusCodeRules = statusCodeRules
 	return plat, nil
 }

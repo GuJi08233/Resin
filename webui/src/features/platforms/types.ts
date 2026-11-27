@@ -30,13 +30,20 @@ export type PlatformIPInfoFilters = {
   asns: string[];
 };
 
+export type PlatformLatencyFilters = {
+  min_ms: number | null;
+  max_ms: number | null;
+};
+
 export type Platform = {
   id: string;
   name: string;
   sticky_ttl: string;
   regex_filters: string[];
   region_filters: string[];
+  continent_filters: string[];
   ipinfo_filters: PlatformIPInfoFilters;
+  latency_filters: PlatformLatencyFilters;
   routable_node_count: number;
   reverse_proxy_miss_action: PlatformMissAction;
   reverse_proxy_empty_account_behavior: PlatformEmptyAccountBehavior;
@@ -59,7 +66,9 @@ export type PlatformCreateInput = {
   sticky_ttl?: string;
   regex_filters?: string[];
   region_filters?: string[];
+  continent_filters?: string[];
   ipinfo_filters?: PlatformIPInfoFilters;
+  latency_filters?: PlatformLatencyFilters;
   reverse_proxy_miss_action?: PlatformMissAction;
   reverse_proxy_empty_account_behavior?: PlatformEmptyAccountBehavior;
   reverse_proxy_fixed_account_header?: string;
@@ -73,7 +82,9 @@ export type PlatformUpdateInput = {
   sticky_ttl?: string;
   regex_filters?: string[];
   region_filters?: string[];
+  continent_filters?: string[];
   ipinfo_filters?: PlatformIPInfoFilters;
+  latency_filters?: PlatformLatencyFilters;
   reverse_proxy_miss_action?: PlatformMissAction;
   reverse_proxy_empty_account_behavior?: PlatformEmptyAccountBehavior;
   reverse_proxy_fixed_account_header?: string;

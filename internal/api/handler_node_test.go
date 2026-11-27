@@ -557,3 +557,158 @@ func TestHandleListNodes_SortByFraudScore(t *testing.T) {
 		}
 	}
 }
+
+func addNodeWithRegionAndLatencyForTest(
+	t *testing.T,
+	cp *service.ControlPlaneService,
+	sub *subscription.Subscription,
+	raw string,
+	region string,
+	latMs int,
+) node.Hash {
+	t.Helper()
+
+	hash := node.HashFromRawOptions([]byte(raw))
+	cp.Pool.AddNodeFromSub(hash, []byte(raw), sub.ID)
+	sub.ManagedNodes().StoreNode(hash, subscription.ManagedNode{Tags: []string{"tag-" + region}})
+
+	entry, ok := cp.Pool.GetEntry(hash)
+	if !ok {
+		t.Fatalf("node %s missing after add", hash.Hex())
+	}
+	if region != "" {
+		entry.SetEgressRegion(region)
+	}
+	if latMs > 0 {
+		entry.LatencyTable.LoadEntry("gstatic.com", node.DomainLatencyStats{
+			Ewma:        time.Duration(latMs) * time.Millisecond,
+			LastUpdated: time.Now(),
+		})
+	}
+	return hash
+}
+
+func TestHandleListNodes_ContinentAndLatencyFilters(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	sub := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
+	cp.SubMgr.Register(sub)
+
+	addNodeWithRegionAndLatencyForTest(t, cp, sub, `{"type":"ss","server":"1.1.1.1","port":443}`, "hk", 50)
+	addNodeWithRegionAndLatencyForTest(t, cp, sub, `{"type":"ss","server":"2.2.2.2","port":443}`, "de", 180)
+	addNodeWithRegionAndLatencyForTest(t, cp, sub, `{"type":"ss","server":"3.3.3.3","port":443}`, "fr", 420)
+	addNodeWithRegionAndLatencyForTest(t, cp, sub, `{"type":"ss","server":"4.4.4.4","port":443}`, "us", 0)
+
+	cases := []struct {
+		name  string
+		query string
+		want  int
+	}{
+		{name: "continent eu", query: "&continent=eu", want: 2},
+		{name: "continent comma list", query: "&continent=as,eu", want: 3},
+		{name: "continent repeated", query: "&continent=as&continent=na", want: 2},
+		{name: "continent exclude", query: "&continent=!eu", want: 2},
+		{name: "continent plus region", query: "&continent=eu&region=de", want: 1},
+		{name: "max latency", query: "&max_latency_ms=200", want: 2},
+		{name: "min latency", query: "&min_latency_ms=180", want: 2},
+		{name: "latency range", query: "&min_latency_ms=100&max_latency_ms=300", want: 1},
+		{name: "has latency true", query: "&has_latency=true", want: 3},
+		{name: "has latency false", query: "&has_latency=false", want: 1},
+		{name: "combined continent and latency", query: "&continent=eu&max_latency_ms=250", want: 1},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doJSONRequest(
+				t,
+				srv,
+				http.MethodGet,
+				"/api/v1/nodes?subscription_id="+sub.ID+tc.query,
+				nil,
+				true,
+			)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+			}
+			body := decodeJSONMap(t, rec)
+			if body["total"] != float64(tc.want) {
+				t.Fatalf("total: got %v, want %d", body["total"], tc.want)
+			}
+		})
+	}
+}
+
+func TestHandleListNodes_ContinentAndLatencyFilterValidation(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	sub := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
+	cp.SubMgr.Register(sub)
+
+	invalidQueries := []string{
+		"continent=europe",
+		"continent=!zz",
+		"min_latency_ms=-1",
+		"max_latency_ms=-10",
+		"max_latency_ms=abc",
+		"min_latency_ms=300&max_latency_ms=100",
+		"has_latency=maybe",
+	}
+	for _, query := range invalidQueries {
+		t.Run(query, func(t *testing.T) {
+			rec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/nodes?"+query, nil, true)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status: got %d, want 400, body=%s", rec.Code, rec.Body.String())
+			}
+			assertErrorCode(t, rec, "INVALID_ARGUMENT")
+		})
+	}
+}
+
+func TestHandleListNodes_SortByLatency(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	sub := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
+	cp.SubMgr.Register(sub)
+
+	addNodeWithRegionAndLatencyForTest(t, cp, sub, `{"type":"ss","server":"1.1.1.1","port":443}`, "hk", 350)
+	addNodeWithRegionAndLatencyForTest(t, cp, sub, `{"type":"ss","server":"2.2.2.2","port":443}`, "de", 50)
+	addNodeWithRegionAndLatencyForTest(t, cp, sub, `{"type":"ss","server":"3.3.3.3","port":443}`, "fr", 180)
+	addNodeWithRegionAndLatencyForTest(t, cp, sub, `{"type":"ss","server":"4.4.4.4","port":443}`, "us", 0)
+
+	checkOrder := func(order string, want []float64) {
+		t.Helper()
+		rec := doJSONRequest(
+			t,
+			srv,
+			http.MethodGet,
+			"/api/v1/nodes?subscription_id="+sub.ID+"&sort_by=latency&sort_order="+order,
+			nil,
+			true,
+		)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s status: got %d, want 200, body=%s", order, rec.Code, rec.Body.String())
+		}
+		body := decodeJSONMap(t, rec)
+		items := body["items"].([]any)
+		if len(items) != len(want) {
+			t.Fatalf("%s items len = %d, want %d", order, len(items), len(want))
+		}
+		got := make([]float64, 0, len(items))
+		for _, item := range items {
+			nodeItem := item.(map[string]any)
+			if v, ok := nodeItem["reference_latency_ms"].(float64); ok {
+				got = append(got, v)
+			} else {
+				got = append(got, -1)
+			}
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("%s latencies = %v, want %v", order, got, want)
+			}
+		}
+	}
+
+	checkOrder("asc", []float64{50, 180, 350, -1})
+	checkOrder("desc", []float64{350, 180, 50, -1})
+}

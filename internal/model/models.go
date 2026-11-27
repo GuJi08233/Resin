@@ -10,7 +10,9 @@ type Platform struct {
 	StickyTTLNs                      int64  `json:"sticky_ttl_ns"`
 	RegexFilters                     []string
 	RegionFilters                    []string
+	ContinentFilters                 []string
 	IPInfoFilters                    PlatformIPInfoFilter
+	LatencyFilters                   PlatformLatencyFilter
 	ReverseProxyMissAction           string                   `json:"reverse_proxy_miss_action"`
 	ReverseProxyEmptyAccountBehavior string                   `json:"reverse_proxy_empty_account_behavior"`
 	ReverseProxyFixedAccountHeader   string                   `json:"reverse_proxy_fixed_account_header"`
@@ -18,6 +20,14 @@ type Platform struct {
 	PassiveCircuitBreakerDisabled    bool                     `json:"passive_circuit_breaker_disabled"`
 	StatusCodeRules                  []PlatformStatusCodeRule `json:"status_code_rules"`
 	UpdatedAtNs                      int64                    `json:"updated_at_ns"`
+}
+
+// PlatformLatencyFilter constrains platform routability by the node's
+// reference latency (average EWMA across configured authority domains, in ms).
+// Nil bounds mean "no constraint".
+type PlatformLatencyFilter struct {
+	MinMs *int `json:"min_ms,omitempty"`
+	MaxMs *int `json:"max_ms,omitempty"`
 }
 
 // PlatformIPInfoFilter constrains platform routability by the node's IPPure
